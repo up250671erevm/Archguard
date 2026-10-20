@@ -21,7 +21,13 @@ git push origin v0.1.0
 Then create the GitHub release from the tag (paste the CHANGELOG section):
 
 ```sh
-gh release create v0.1.0 --title "archguard 0.1.0" --notes-file <(sed -n '/^## \[0.1.0\]/,/^## \[/p' CHANGELOG.md | sed '$d')
+# Only the body of the [0.1.0] section: stops at the next "## [" heading or
+# at the link references ("[Unreleased]: …") at the end of the file.
+awk -v v="0.1.0" '
+  $0 ~ "^## \\[" v "\\]" { f = 1; next }
+  /^## \[/ || /^\[[^]]+\]: / { f = 0 }
+  f' CHANGELOG.md > /tmp/notes.md
+gh release create v0.1.0 --title "archguard 0.1.0" --notes-file /tmp/notes.md
 ```
 
 ## 3. Fill in the tarball checksum
@@ -56,11 +62,22 @@ namcap archguard-0.1.0-1-x86_64.pkg.tar.zst
 
 ## 5. Publish to the AUR
 
+**Guard first** — refuses the all-zero placeholder, `SKIP`, any
+PKGBUILD/.SRCINFO/Cargo.toml/CHANGELOG mismatch, and a sha256 that doesn't
+match the real GitHub tarball:
+
+```sh
+packaging/check-release-ready.sh 0.1.0 || exit 1
+```
+
+CI also runs this guard on `main` as soon as the checksum is no longer the
+placeholder (job *release PKGBUILD*), so a bad checksum commit turns CI red.
+
 One-time: add your SSH key to your AUR account. Then for each package:
 
 ```sh
 git clone ssh://aur@aur.archlinux.org/archguard.git aur-archguard
-cp packaging/archguard/{PKGBUILD,.SRCINFO} aur-archguard/
+packaging/check-release-ready.sh 0.1.0 && cp packaging/archguard/{PKGBUILD,.SRCINFO} aur-archguard/
 cd aur-archguard
 git add PKGBUILD .SRCINFO
 git commit -m "Update to 0.1.0"

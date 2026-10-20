@@ -124,10 +124,18 @@ impl CommandRunner for SystemRunner {
         Ok(st.code().unwrap_or(1))
     }
 
+    /// Hooks run in their **own process group** with stdin closed (they
+    /// must be non-interactive). On timeout the whole group gets SIGTERM,
+    /// then SIGKILL, so background children (`sleep 300 &`) die too.
     fn run_timeout(&mut self, cmd: &CommandSpec, timeout: Duration) -> Result<Option<i32>> {
+        use std::os::unix::process::CommandExt;
         let mut child = std::process::Command::new(&cmd.program)
             .args(&cmd.args)
+            .stdin(std::process::Stdio::null())
+            .process_group(0)
             .spawn()?;
+        // The child is the group leader: pgid == pid.
+        let pgid = i32::try_from(child.id()).ok().filter(|p| *p > 0);
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(st) = child.try_wait()? {
@@ -138,22 +146,30 @@ impl CommandRunner for SystemRunner {
             }
             std::thread::sleep(POLL);
         }
-        // Timed out: SIGTERM, then SIGKILL after a grace period.
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // SAFETY: plain kill(2) on our own child's pid.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-        }
-        let grace = Instant::now() + KILL_GRACE;
-        while Instant::now() < grace {
-            if child.try_wait()?.is_some() {
-                return Ok(None);
+        let kill_group = |sig| {
+            if let Some(g) = pgid {
+                // SAFETY: kill(2) on our own child's process group.
+                unsafe { libc::kill(-g, sig) };
             }
+        };
+        kill_group(libc::SIGTERM);
+        let grace = Instant::now() + KILL_GRACE;
+        while Instant::now() < grace && group_alive(pgid) {
+            let _ = child.try_wait();
             std::thread::sleep(POLL);
         }
+        // Leader may be gone while children linger: always SIGKILL the group.
+        kill_group(libc::SIGKILL);
         let _ = child.kill();
         let _ = child.wait();
         Ok(None)
     }
+}
+
+/// True if any process in group `pgid` can still be signalled.
+fn group_alive(pgid: Option<i32>) -> bool {
+    // SAFETY: signal 0 only checks existence/permission.
+    pgid.is_some_and(|g| unsafe { libc::kill(-g, 0) } == 0)
 }
 
 /// Records commands without executing them.
@@ -443,6 +459,70 @@ mod tests {
         assert!(SystemRunner
             .run_timeout(&missing, Duration::from_secs(1))
             .is_err());
+    }
+
+    /// Process state from /proc, `None` if gone. Orphans reparented to a
+    /// non-reaping PID 1 (containers) may linger as zombies: count those as dead.
+    fn proc_alive(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => {
+                let state = s
+                    .rsplit(')')
+                    .next()
+                    .and_then(|r| r.split_whitespace().next());
+                !matches!(state, Some("Z") | Some("X"))
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn timeout_kills_backgrounded_children() {
+        let dir = std::env::temp_dir().join(format!("ag-pg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("bg.pid");
+        let script = format!(
+            "sleep 300 & echo $! > '{}'; trap '' TERM; sleep 400",
+            pidfile.display()
+        );
+        let hook = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), script],
+        };
+        let r = SystemRunner
+            .run_timeout(&hook, Duration::from_millis(500))
+            .unwrap();
+        assert_eq!(r, None, "must time out");
+        let bg: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // Give the kernel a moment to deliver SIGKILL.
+        let t0 = Instant::now();
+        while proc_alive(bg) && t0.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !proc_alive(bg),
+            "backgrounded child {bg} survived the timeout"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn hooks_get_no_stdin() {
+        // `read` on a closed stdin returns immediately (EOF) instead of hanging.
+        let hook = CommandSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "read -r x; exit 7".into()],
+        };
+        assert_eq!(
+            SystemRunner
+                .run_timeout(&hook, Duration::from_secs(10))
+                .unwrap(),
+            Some(7)
+        );
     }
 
     #[test]

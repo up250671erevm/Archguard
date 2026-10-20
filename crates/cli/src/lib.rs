@@ -208,6 +208,18 @@ pub fn cmd_check_notify(
 /// `archguard ack`. Mutates `ctx.state`; caller persists it.
 pub fn cmd_ack(ctx: &mut Ctx, ids: &[String], all: bool, out: &mut dyn Write) -> Result<i32> {
     let items = ctx.news.fetch()?;
+    cmd_ack_items(&mut ctx.state, &items, ids, all, out)
+}
+
+/// Ack against already-fetched `items`. Lets callers fetch the feed
+/// *before* taking the state lock (no lock held during network I/O).
+pub fn cmd_ack_items(
+    state: &mut State,
+    items: &[archguard_core::news::NewsItem],
+    ids: &[String],
+    all: bool,
+    out: &mut dyn Write,
+) -> Result<i32> {
     let mut targets: Vec<String> = Vec::new();
     if all {
         targets.extend(items.iter().map(|i| i.id.clone()));
@@ -216,14 +228,14 @@ pub fn cmd_ack(ctx: &mut Ctx, ids: &[String], all: bool, out: &mut dyn Write) ->
             if arg.trim().is_empty() {
                 bail!("empty news id");
             }
-            let found = resolve_ids(&items, arg);
+            let found = resolve_ids(items, arg);
             if found.is_empty() {
                 bail!("no news item matches `{arg}`");
             }
             targets.extend(found.into_iter().map(str::to_string));
         }
     }
-    let n = targets.iter().filter(|t| ctx.state.ack(t)).count();
+    let n = targets.iter().filter(|t| state.ack(t)).count();
     writeln!(out, "archguard: acknowledged {n} news item(s).")?;
     Ok(EXIT_OK)
 }

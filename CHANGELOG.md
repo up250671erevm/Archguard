@@ -14,12 +14,18 @@ First public release.
 - `archguard check [--notify]`: reads the Arch news RSS feed, matches items
   against installed packages (libalpm, local DB only — never syncs) and exits 1
   if relevant unacknowledged news exist. Feed downloads are capped at 4 MiB;
-  items without a GUID get a deterministic id; untitled items block (fail-closed).
+  untitled items block (fail-closed).
+- Items without a source GUID get a deterministic id `archguard:<sha256>` of
+  link + title + publication date (or title + date + summary without a link).
+  Two items sharing a link therefore never share an ack; editing the title or
+  date of such an item makes it block again (fail-closed).
 - `archguard ack <id|slug>... | --all` with durable (fsync) and locked state in
-  `~/.local/state/archguard/state`.
+  `~/.local/state/archguard/state` (the feed is fetched before the lock is taken).
 - `archguard upgrade [-- args]`: refuses `-Syu` while news block; runs pacman
   (via sudo/run0) or paru/yay (never as root); `[hooks] pre_upgrade` commands
-  with a per-hook timeout (`timeout_secs`, default 300) — failure or timeout blocks.
+  with a per-hook timeout (`timeout_secs`, default 300) — failure or timeout
+  blocks. Hooks run non-interactively (stdin closed) in their own process
+  group; on timeout the whole group is killed (SIGTERM, then SIGKILL).
 - `archguard pacnew list|diff|merge`: 3-way merge of `.pacnew` files using the
   previous package version from the pacman cache as base (follows links inside
   the archive), meld/kdiff3 on conflict, writes through symlinks, keeps

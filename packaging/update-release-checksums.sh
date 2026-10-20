@@ -6,6 +6,11 @@
 set -euo pipefail
 
 ver="${1:?usage: $0 <version>   (e.g. 0.1.0)}"
+# Validate before it is used in URLs or sed expressions.
+if [[ ! "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "error: version must look like 1.2.3 (no leading v), got: $ver" >&2
+  exit 2
+fi
 root="$(cd "$(dirname "$0")/.." && pwd)"
 dir="$root/packaging/archguard"
 url="https://github.com/up250671erevm/Archguard/archive/refs/tags/v${ver}.tar.gz"
@@ -40,4 +45,5 @@ else
          -e "s/^\tsha256sums = .*/\tsha256sums = ${sum}/" "$dir/.SRCINFO"
 fi
 echo "updated $dir/PKGBUILD and $dir/.SRCINFO"
+"$root/packaging/check-release-ready.sh" "$ver" --offline
 git -C "$root" --no-pager diff --stat -- packaging/archguard

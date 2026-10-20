@@ -53,10 +53,10 @@ Notifications use notify-rust when built with feature `archguard/notify` (the PK
 ```toml
 [hooks]
 pre_upgrade = ["pkgwatch check", "aurscan --pre-upgrade"]
-timeout_secs = 300   # per hook; a hook that hangs is killed (SIGTERM, then SIGKILL) and blocks
+timeout_secs = 300   # per hook; on timeout its whole process group is killed (SIGTERM, then SIGKILL) and the upgrade blocks
 ```
 
-Run in order, as your user (never elevated), without a shell (quoting like `sh`, but `;`, `|`, `$()` are literal), only after the news check passed and before `-Syu`. Any non-zero exit — or a hook that can't be started — blocks the upgrade (fail-closed).
+Run non-interactively (stdin closed, own process group), in order, as your user (never elevated), without a shell (quoting like `sh`, but `;`, `|`, `$()` are literal), only after the news check passed and before `-Syu`. Any non-zero exit — or a hook that can't be started — blocks the upgrade (fail-closed).
 
 `upgrade` refuses to run `-Syu` while `check` is blocking. Only `pacman` is elevated (sudo/run0); paru/yay are never run as root.
 

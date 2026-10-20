@@ -139,18 +139,32 @@ jobs:
           test "$cargo_ver" = "$pkg_ver"
           grep -q "^## \[$cargo_ver\]" CHANGELOG.md
           sed -n '/^name = "archguard"$/,/^$/p' Cargo.lock | grep -q "^version = \"$cargo_ver\""
-      - name: Simulate tag tarball (git archive, same layout as GitHub)
+      - name: Release source (simulated tag tarball, or the real one once the checksum is filled)
+        shell: bash
         run: |
+          set -euo pipefail
           ver=$(sed -n 's/^pkgver=//p' packaging/archguard/PKGBUILD)
           useradd -m builder
-          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
           mkdir /home/builder/rel
-          git archive --format=tar.gz --prefix="Archguard-$ver/" -o "/home/builder/rel/archguard-$ver.tar.gz" HEAD
           cp packaging/archguard/PKGBUILD /home/builder/rel/
-          sum=$(sha256sum "/home/builder/rel/archguard-$ver.tar.gz" | cut -d' ' -f1)
-          # The committed placeholder must still be there (filled only after tagging).
-          grep -q "^sha256sums=('0\{64\}')" /home/builder/rel/PKGBUILD
-          sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" /home/builder/rel/PKGBUILD
+          if grep -q "^sha256sums=('0\{64\}')" packaging/archguard/PKGBUILD; then
+            echo "placeholder checksum: pre-tag, simulating the tarball"
+            # The publish guard must refuse the placeholder.
+            if packaging/check-release-ready.sh "$ver" --offline; then
+              echo "::error::check-release-ready accepted the zero checksum"; exit 1
+            fi
+            git archive --format=tar.gz --prefix="Archguard-$ver/" -o "/home/builder/rel/archguard-$ver.tar.gz" HEAD
+            sum=$(sha256sum "/home/builder/rel/archguard-$ver.tar.gz" | cut -d' ' -f1)
+            sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" /home/builder/rel/PKGBUILD
+            # ...and accept a consistent filled-in tree.
+            cp -r . /tmp/filled
+            sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" /tmp/filled/packaging/archguard/PKGBUILD
+            sed -i "s/^\tsha256sums = .*/\tsha256sums = $sum/" /tmp/filled/packaging/archguard/.SRCINFO
+            /tmp/filled/packaging/check-release-ready.sh "$ver" --offline
+          else
+            echo "real checksum: verifying against the GitHub tag tarball"
+            packaging/check-release-ready.sh "$ver"
+          fi
           chown -R builder: /home/builder/rel
       - name: namcap PKGBUILD
         run: namcap /home/builder/rel/PKGBUILD
