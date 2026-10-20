@@ -123,14 +123,12 @@ jobs:
             /usr/lib/systemd/user/archguard-check.service /usr/lib/systemd/user/archguard-check.timer
 
   release-pkg:
-    name: release PKGBUILD (simulated tag tarball) + namcap + clean chroot
+    name: release PKGBUILD (simulated tag tarball) + namcap
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
-      options: --privileged
+    container: archlinux:latest
     steps:
       - name: Install deps
-        run: pacman -Syu --noconfirm --needed base-devel git rust namcap devtools sudo
+        run: pacman -Syu --noconfirm --needed base-devel git rust namcap sudo
       - uses: actions/checkout@v5
       - name: Version consistency
         run: |
@@ -160,20 +158,23 @@ jobs:
         run: cd /home/builder/rel && sudo -u builder makepkg --noconfirm --cleanbuild
       - name: namcap package
         run: cd /home/builder/rel && namcap archguard-*.pkg.tar.zst
-      - name: Clean chroot build (devtools)
+
+  clean-chroot:
+    name: release PKGBUILD in clean chroot (devtools extra-x86_64-build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Simulate tag tarball
         run: |
-          # systemd-nspawn needs a machine id; docker images ship none.
-          test -s /etc/machine-id || systemd-machine-id-setup
-          # ...and registers the container with systemd-machined over the
-          # system bus. Docker has neither, so start both by hand.
-          mkdir -p /run/dbus
-          dbus-daemon --system --fork
-          /usr/lib/systemd/systemd-machined &
-          for i in $(seq 1 20); do busctl status org.freedesktop.machine1 >/dev/null 2>&1 && break; sleep 0.5; done
-          busctl status org.freedesktop.machine1 | head -3 || true
-          cd /home/builder/rel
-          rm -f archguard-*.pkg.tar.zst
-          sudo -u builder extra-x86_64-build -- -- --noconfirm
-          ls -l archguard-*.pkg.tar.zst
-          namcap archguard-*.pkg.tar.zst
-          pacman -Qip archguard-*.pkg.tar.zst | grep -E '^(Name|Version|Conflicts With|Depends On)'
+          ver=$(sed -n 's/^pkgver=//p' packaging/archguard/PKGBUILD)
+          mkdir -p rel
+          git archive --format=tar.gz --prefix="Archguard-$ver/" -o "rel/archguard-$ver.tar.gz" HEAD
+          cp packaging/archguard/PKGBUILD rel/
+          sum=$(sha256sum "rel/archguard-$ver.tar.gz" | cut -d' ' -f1)
+          sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" rel/PKGBUILD
+      - name: extra-x86_64-build
+        run: sudo ci/clean-chroot-build.sh rel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archguard-pkg-clean-chroot
+          path: rel/out/*.pkg.tar.zst
