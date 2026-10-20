@@ -15,6 +15,9 @@ use archguard_core::state::State;
 use archguard_runner::{guarded_upgrade, upgrade_command, CommandRunner, UpgradeOutcome};
 use clap::{Parser, Subcommand};
 use std::io::Write;
+use std::path::PathBuf;
+
+pub mod pacnew;
 
 /// Exit code: no blocking news.
 pub const EXIT_OK: i32 = 0;
@@ -47,6 +50,29 @@ pub enum Command {
         /// Extra arguments passed to the package manager.
         #[arg(last = true)]
         extra: Vec<String>,
+    },
+    /// Find, diff and merge .pacnew / .pacsave files.
+    #[command(subcommand)]
+    Pacnew(PacnewCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PacnewCmd {
+    /// List .pacnew / .pacsave files under the configured scan dirs.
+    #[command(alias = "scan")]
+    List,
+    /// Show a unified diff between the live file and its .pacnew.
+    Diff {
+        /// Live file or its .pacnew path.
+        file: PathBuf,
+    },
+    /// 3-way merge a .pacnew into the live file.
+    Merge {
+        /// Live file or its .pacnew path.
+        file: PathBuf,
+        /// Do not ask for confirmation before writing.
+        #[arg(long, short)]
+        yes: bool,
     },
 }
 
@@ -120,6 +146,9 @@ pub fn cmd_ack(ctx: &mut Ctx, ids: &[String], all: bool, out: &mut dyn Write) ->
         targets.extend(items.iter().map(|i| i.id.clone()));
     } else {
         for arg in ids {
+            if arg.trim().is_empty() {
+                bail!("empty news id");
+            }
             let found = resolve_ids(&items, arg);
             if found.is_empty() {
                 bail!("no news item matches `{arg}`");

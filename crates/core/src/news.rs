@@ -1,7 +1,21 @@
 //! Arch news feed fetching and parsing.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use std::io::Read;
 use std::time::Duration;
+
+/// Maximum accepted feed size (the real Arch feed is ~100 KiB).
+pub const MAX_FEED_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Read at most `max` bytes; error if the source is larger.
+pub fn read_limited<R: Read>(r: R, max: u64) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    r.take(max + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > max {
+        bail!("news feed exceeds {max} bytes");
+    }
+    Ok(buf)
+}
 
 /// A single news item.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,24 +66,35 @@ pub fn parse_feed(bytes: &[u8]) -> Result<Vec<NewsItem>> {
     Ok(feed
         .entries
         .into_iter()
-        .map(|e| {
+        .filter_map(|e| {
             let link = e.links.first().map(|l| l.href.clone());
             let summary = e
                 .summary
                 .map(|t| t.content)
                 .or_else(|| e.content.and_then(|c| c.body))
                 .unwrap_or_default();
-            NewsItem {
-                id: if e.id.is_empty() {
-                    link.clone().unwrap_or_default()
-                } else {
-                    e.id
-                },
-                title: e.title.map(|t| t.content).unwrap_or_default(),
+            let title = e.title.map(|t| t.content).unwrap_or_default();
+            if title.trim().is_empty() && link.is_none() {
+                return None; // nothing a user could read or ack meaningfully
+            }
+            let published = e.published.or(e.updated).map(|d| d.timestamp());
+            // Empty GUIDs: fall back to link, then title+date; skip if nothing usable.
+            let id = [Some(e.id), link.clone()]
+                .into_iter()
+                .flatten()
+                .map(|s| s.trim().to_string())
+                .find(|s| !s.is_empty())
+                .or_else(|| {
+                    (!title.trim().is_empty())
+                        .then(|| format!("title:{}:{}", published.unwrap_or(0), title.trim()))
+                })?;
+            Some(NewsItem {
+                id,
+                title,
                 summary: strip_html(&summary),
                 link,
-                published: e.published.or(e.updated).map(|d| d.timestamp()),
-            }
+                published,
+            })
         })
         .collect())
 }
@@ -90,12 +115,15 @@ impl NewsSource for HttpNews {
             .timeout(Duration::from_secs(20))
             .user_agent(concat!("archguard/", env!("CARGO_PKG_VERSION")))
             .build()?;
-        let bytes = client
+        let resp = client
             .get(&self.url)
             .send()
             .and_then(|r| r.error_for_status())
-            .with_context(|| format!("fetching {}", self.url))?
-            .bytes()?;
+            .with_context(|| format!("fetching {}", self.url))?;
+        if resp.content_length().is_some_and(|l| l > MAX_FEED_BYTES) {
+            bail!("news feed exceeds {MAX_FEED_BYTES} bytes");
+        }
+        let bytes = read_limited(resp, MAX_FEED_BYTES)?;
         parse_feed(&bytes)
     }
 }
@@ -132,6 +160,28 @@ mod tests {
     #[test]
     fn strip_html_works() {
         assert_eq!(strip_html("<p>a &amp; b</p>").trim(), "a & b");
+    }
+
+    #[test]
+    fn size_limit() {
+        assert_eq!(read_limited(&b"abcd"[..], 4).unwrap(), b"abcd");
+        assert!(read_limited(&b"abcde"[..], 4).is_err());
+    }
+
+    #[test]
+    fn empty_ids_fallback_or_skip() {
+        let xml = br#"<?xml version="1.0"?><rss version="2.0"><channel><title>t</title>
+<item><title>No guid</title><link>https://archlinux.org/news/no-guid/</link></item>
+<item><title>Only title</title><guid>  </guid></item>
+<item><description>nothing</description></item>
+</channel></rss>"#;
+        let items = parse_feed(xml).unwrap();
+        assert!(items.iter().all(|i| !i.id.trim().is_empty()));
+        let ids: std::collections::BTreeSet<_> = items.iter().map(|i| &i.id).collect();
+        assert_eq!(ids.len(), items.len(), "ids must be unique: {items:?}");
+        assert!(items.iter().any(|i| i.title == "No guid"));
+        assert!(items.iter().any(|i| i.title == "Only title"));
+        assert!(items.iter().all(|i| !i.title.is_empty()));
     }
 
     #[test]

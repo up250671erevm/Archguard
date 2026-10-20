@@ -106,3 +106,13 @@ fn version_matches_cargo_pkg_version() {
 fn cli_debug_assert() {
     Cli::command().debug_assert();
 }
+
+#[test]
+fn ack_rejects_empty_id() {
+    let n = news();
+    let pkgs = FakePackages::new(["foolib"]);
+    let mut c = ctx(&n, &pkgs, Helper::Pacman);
+    assert!(cmd_ack(&mut c, &["".into()], false, &mut Vec::new()).is_err());
+    assert!(cmd_ack(&mut c, &["  ".into()], false, &mut Vec::new()).is_err());
+    assert!(c.state.acked.is_empty());
+}

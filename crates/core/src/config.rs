@@ -11,6 +11,11 @@
 //! ignore = ["linux"]     # package names that never trigger a block
 //! always_block = false   # treat every unacked news item as relevant
 //! max_age_days = 0       # only consider news newer than N days (0 = all)
+//!
+//! [pacnew]
+//! merge_tool = "auto"    # auto | meld | kdiff3 | none
+//! scan_dirs = ["/etc"]
+//! cache_dir = "/var/cache/pacman/pkg"
 //! ```
 
 use anyhow::{Context, Result};
@@ -59,6 +64,38 @@ impl Default for Matching {
     }
 }
 
+/// External merge tool for conflicts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeTool {
+    /// First of meld / kdiff3 found in `$PATH`.
+    #[default]
+    Auto,
+    Meld,
+    Kdiff3,
+    /// Never launch a GUI tool; leave conflict markers in a temp file.
+    None,
+}
+
+/// `.pacnew` handling options.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Pacnew {
+    pub merge_tool: MergeTool,
+    pub scan_dirs: Vec<String>,
+    pub cache_dir: String,
+}
+
+impl Default for Pacnew {
+    fn default() -> Self {
+        Self {
+            merge_tool: MergeTool::Auto,
+            scan_dirs: vec!["/etc".into()],
+            cache_dir: "/var/cache/pacman/pkg".into(),
+        }
+    }
+}
+
 /// Full configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -67,6 +104,7 @@ pub struct Config {
     pub elevation: Elevation,
     pub feed_url: String,
     pub matching: Matching,
+    pub pacnew: Pacnew,
 }
 
 impl Default for Config {
@@ -76,6 +114,7 @@ impl Default for Config {
             elevation: Elevation::default(),
             feed_url: crate::NEWS_FEED_URL.to_string(),
             matching: Matching::default(),
+            pacnew: Pacnew::default(),
         }
     }
 }
@@ -116,6 +155,9 @@ mod tests {
             [matching]
             match_summary = true
             ignore = ["linux"]
+            [pacnew]
+            merge_tool = "kdiff3"
+            scan_dirs = ["/etc", "/usr/share/x"]
             "#,
         )
         .unwrap();
@@ -125,6 +167,9 @@ mod tests {
         assert!(c.matching.match_summary);
         assert_eq!(c.matching.ignore, vec!["linux"]);
         assert_eq!(c.matching.min_name_len, 2);
+        assert_eq!(c.pacnew.merge_tool, MergeTool::Kdiff3);
+        assert_eq!(c.pacnew.scan_dirs.len(), 2);
+        assert_eq!(c.pacnew.cache_dir, "/var/cache/pacman/pkg");
     }
 
     #[test]

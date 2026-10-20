@@ -57,6 +57,10 @@ pub fn evaluate(
 
 /// Resolve an ack argument (full id or short slug) to full ids.
 pub fn resolve_ids<'a>(items: &'a [NewsItem], arg: &str) -> Vec<&'a str> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Vec::new();
+    }
     items
         .iter()
         .filter(|i| i.id == arg || i.short_id() == arg)
@@ -137,5 +141,7 @@ mod tests {
             1
         );
         assert!(resolve_ids(&items, "nope").is_empty());
+        assert!(resolve_ids(&items, "").is_empty());
+        assert!(resolve_ids(&items, "  ").is_empty());
     }
 }

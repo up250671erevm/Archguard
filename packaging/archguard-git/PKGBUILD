@@ -7,10 +7,13 @@ pkgdesc="Blocks Arch Linux upgrades when relevant Arch news needs attention"
 arch=('x86_64')
 url="https://github.com/up250671erevm/Archguard"
 license=('GPL-3.0-or-later')
-depends=('gcc-libs' 'glibc' 'libalpm.so')
+depends=('libgcc' 'glibc' 'libalpm.so=16-64')
 makedepends=('git' 'cargo')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
+optdepends=('meld: graphical 3-way .pacnew merge'
+            'kdiff3: alternative graphical 3-way .pacnew merge'
+            'sudo: elevation for upgrades and /etc writes')
 options=('!lto')
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
