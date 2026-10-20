@@ -7,11 +7,17 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Blocks Arch Linux upgrades when relevant Arch news needs attention"
 
+[features]
+default = []
+## Read installed packages via libalpm instead of `pacman -Qq`.
+alpm = ["archguard-core/alpm"]
+
 [[bin]]
 name = "archguard"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 archguard-core = { path = "../core" }
 archguard-runner = { path = "../runner" }

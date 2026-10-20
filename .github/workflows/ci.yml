@@ -24,16 +24,72 @@ jobs:
       - name: test
         run: cargo test --workspace --locked
 
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - name: build + test
+        run: cargo test --workspace --locked
+
   archlinux:
+    name: archlinux (alpm feature)
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
       - name: Install deps
         run: pacman -Syu --noconfirm --needed base-devel git rust
       - uses: actions/checkout@v4
-      - name: build
-        run: cargo build --workspace --locked --release
-      - name: test
-        run: cargo test --workspace --locked
-      - name: version
-        run: ./target/release/archguard --version
+      - name: libalpm / alpm crate compatibility
+        run: |
+          echo "pacman: $(pacman -Q pacman)"
+          ls -l /usr/lib/libalpm.so*
+          grep -A1 '^name = "alpm"$' Cargo.lock
+          cargo test --locked -p archguard-core --features alpm -- packages::tests::libalpm_version_is_supported --exact
+      - name: clippy (alpm)
+        run: cargo clippy --workspace --all-targets --locked --features archguard/alpm -- -D warnings
+      - name: test (alpm)
+        run: cargo test --workspace --locked --features archguard/alpm
+      - name: build release (alpm)
+        run: cargo build --workspace --locked --release --features archguard/alpm
+      - name: smoke
+        run: |
+          ./target/release/archguard --version
+          ./target/release/archguard --help
+
+  makepkg:
+    name: makepkg + namcap (archguard-git)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install deps
+        run: pacman -Syu --noconfirm --needed base-devel git rust namcap sudo
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare builder user and local source
+        run: |
+          useradd -m builder
+          git config --system --add safe.directory '*'
+          git checkout -B ci-build
+          mkdir /home/builder/pkg
+          cp packaging/archguard-git/PKGBUILD /home/builder/pkg/
+          sed -i "s|^source=.*|source=(\"\$_pkgname::git+file://$GITHUB_WORKSPACE#branch=ci-build\")|" /home/builder/pkg/PKGBUILD
+          grep '^source=' /home/builder/pkg/PKGBUILD
+          chown -R builder: /home/builder/pkg
+      - name: namcap PKGBUILD
+        run: namcap packaging/archguard-git/PKGBUILD
+      - name: makepkg (non-root)
+        run: cd /home/builder/pkg && sudo -u builder makepkg --noconfirm --cleanbuild
+      - name: namcap package
+        run: |
+          cd /home/builder/pkg
+          ls -l *.pkg.tar.*
+          namcap *.pkg.tar.*
+      - name: install + smoke
+        run: |
+          pacman -U --noconfirm /home/builder/pkg/*.pkg.tar.*
+          archguard --version
+          test -f /usr/share/licenses/archguard-git/LICENSE

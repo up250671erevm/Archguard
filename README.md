@@ -4,7 +4,7 @@
 >
 > **EN:** Rust CLI for Arch Linux / EndeavourOS that reads the Arch news RSS feed, matches items against installed packages and **blocks the upgrade before `-Sy`** when relevant unread news exists. It is a wrapper, not a pacman hook. Later it will help merge `.pacnew` files.
 
-**Status:** Phase 0 (skeleton). Nothing functional yet beyond `archguard --version`.
+**Status:** Phase 1 — `check`, `ack`, `upgrade` implemented.
 
 ## Workspace
 
@@ -15,13 +15,39 @@
 | `crates/merge` | 3-way `.pacnew` merge with `similar`, base from old pkg in `/var/cache/pacman/pkg`, meld/kdiff3 on conflict |
 | `crates/cli` | `archguard` binary (clap) |
 
-> Note: the `alpm` crate dependency is intentionally **not** added yet — it requires libalpm (Arch only) and would break builds on non-Arch CI runners. It will be introduced in F1, built in the `archlinux:latest` CI job.
+> The `alpm` crate (pinned `~5.0`, libalpm 16 / pacman 7.1) is behind the cargo feature `alpm` so non-Arch builds work; without it archguard falls back to `pacman -Qq`. Both only read the **local** DB — archguard never syncs it during `check`.
+
+## Usage / Uso
+
+```sh
+archguard check            # exit 1 if relevant unacknowledged news exist
+archguard ack <id|slug>... # or: archguard ack --all
+archguard upgrade [-- extra pacman/paru/yay args]
+```
+
+`upgrade` refuses to run `-Syu` while `check` is blocking. Only `pacman` is elevated (sudo/run0); paru/yay are never run as root.
+
+Config `~/.config/archguard.toml` (all optional):
+
+```toml
+helper = "paru"        # pacman | paru | yay
+elevation = "sudo"     # sudo | run0
+feed_url = "https://archlinux.org/feeds/news/"
+[matching]
+match_summary = false
+min_name_len = 2
+ignore = []
+always_block = false
+max_age_days = 0
+```
+
+State (acked ids): `~/.local/state/archguard/state`.
 
 ## Install / Instalación
 
 ```sh
 # From source
-cargo install --path crates/cli --locked
+cargo install --path crates/cli --locked --features alpm
 
 # Arch (VCS package)
 cd packaging/archguard-git && makepkg -si

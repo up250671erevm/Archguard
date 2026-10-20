@@ -6,4 +6,16 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+## Read installed packages directly from the local pacman DB via libalpm (Arch only).
+alpm = ["dep:alpm"]
+
 [dependencies]
+anyhow = "1"
+feed-rs = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Pinned to the 5.0 series, which targets libalpm 16 (pacman 7.1).
+alpm = { version = "~5.0", optional = true }

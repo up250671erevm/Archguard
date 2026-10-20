@@ -1,12 +1,22 @@
 //! # archguard-core
 //!
-//! Core logic of archguard (future role):
-//! - Fetch and parse the Arch Linux news RSS feed (`reqwest` + `feed-rs`).
-//! - Match news items against installed packages via libalpm (`alpm` crate).
-//! - Persist acknowledged news / state under `~/.local/state/archguard`.
-//! - Scan the filesystem for `.pacnew` files.
+//! Core logic of archguard:
+//! - [`news`]: fetch and parse the Arch Linux news RSS feed (`reqwest` + `feed-rs`).
+//! - [`packages`]: list installed packages from the *local* pacman DB (never syncs).
+//! - [`matching`]: match news items against installed packages.
+//! - [`state`]: persist acknowledged news under `$XDG_STATE_HOME/archguard/state`.
+//! - [`config`]: TOML config at `$XDG_CONFIG_HOME/archguard.toml`.
+//! - [`check`]: combine all of the above into a verdict.
 //!
-//! Phase 0: stub only.
+//! Future: `.pacnew` scan (F2).
+
+pub mod check;
+pub mod config;
+pub mod matching;
+pub mod news;
+pub mod packages;
+pub mod paths;
+pub mod state;
 
 /// Arch Linux news RSS feed URL.
 pub const NEWS_FEED_URL: &str = "https://archlinux.org/feeds/news/";

@@ -7,3 +7,6 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+anyhow = "1"
+archguard-core = { path = "../core" }
+libc = "0.2"
