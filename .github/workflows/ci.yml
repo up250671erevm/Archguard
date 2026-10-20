@@ -44,7 +44,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install deps
-        run: pacman -Syu --noconfirm --needed base-devel git rust
+        run: pacman -Syu --noconfirm --needed base-devel git rust dbus
       - uses: actions/checkout@v5
       - name: libalpm / alpm crate compatibility
         run: |
@@ -64,7 +64,12 @@ jobs:
           ./target/release/archguard --help
           ./target/release/archguard-tray --version
           # No session bus in CI: must fail cleanly, not panic.
-          ./target/release/archguard-tray && exit 1 || test $? -eq 2
+          ./target/release/archguard-tray --no-retry && exit 1 || test $? -eq 2
+          # Session bus but no StatusNotifierWatcher (like an early login):
+          # the tray must stay up waiting for one instead of exiting.
+          rc=0; timeout 8 dbus-run-session -- ./target/release/archguard-tray --no-retry || rc=$?
+          echo "tray exit code under dbus-run-session: $rc"
+          test "$rc" -eq 124
 
   makepkg:
     name: makepkg + namcap (archguard-git)
@@ -88,6 +93,13 @@ jobs:
           chown -R builder: /home/builder/pkg
       - name: namcap PKGBUILD
         run: namcap packaging/archguard-git/PKGBUILD
+      - name: .SRCINFO up to date (both packages)
+        run: |
+          for d in archguard-git archguard; do
+            cp -r packaging/$d /tmp/srcinfo-$d && chown -R builder: /tmp/srcinfo-$d
+            (cd /tmp/srcinfo-$d && sudo -u builder makepkg --printsrcinfo > /tmp/$d.SRCINFO)
+            diff -u packaging/$d/.SRCINFO /tmp/$d.SRCINFO || { echo "::error::packaging/$d/.SRCINFO is stale"; exit 1; }
+          done
       - name: makepkg (non-root)
         run: cd /home/builder/pkg && sudo -u builder makepkg --noconfirm --cleanbuild
       - name: namcap package
@@ -102,5 +114,57 @@ jobs:
           archguard-tray --version
           test -f /usr/share/licenses/archguard-git/LICENSE
           test -f /usr/share/applications/archguard-tray.desktop
-          systemd-analyze verify --user /usr/lib/systemd/user/archguard-check.service /usr/lib/systemd/user/archguard-check.timer || \
-            systemd-analyze verify /usr/lib/systemd/user/archguard-check.service /usr/lib/systemd/user/archguard-check.timer
+      - name: systemd-analyze --user verify (real user mode, no fallback)
+        run: |
+          uid=$(id -u builder)
+          install -d -m 0700 -o builder -g builder /run/user/$uid
+          sudo -u builder env XDG_RUNTIME_DIR=/run/user/$uid HOME=/home/builder \
+            systemd-analyze --user verify \
+            /usr/lib/systemd/user/archguard-check.service /usr/lib/systemd/user/archguard-check.timer
+
+  release-pkg:
+    name: release PKGBUILD (simulated tag tarball) + namcap + clean chroot
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - name: Install deps
+        run: pacman -Syu --noconfirm --needed base-devel git rust namcap devtools sudo
+      - uses: actions/checkout@v5
+      - name: Version consistency
+        run: |
+          git config --system --add safe.directory '*'
+          cargo_ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          pkg_ver=$(sed -n 's/^pkgver=//p' packaging/archguard/PKGBUILD)
+          echo "Cargo.toml=$cargo_ver PKGBUILD=$pkg_ver"
+          test "$cargo_ver" = "$pkg_ver"
+          grep -q "^## \[$cargo_ver\]" CHANGELOG.md
+          grep -q "^version = \"$cargo_ver\"" <(sed -n '/^name = "archguard"$/,/^$/p' Cargo.lock)
+      - name: Simulate tag tarball (git archive, same layout as GitHub)
+        run: |
+          ver=$(sed -n 's/^pkgver=//p' packaging/archguard/PKGBUILD)
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          mkdir /home/builder/rel
+          git archive --format=tar.gz --prefix="Archguard-$ver/" -o "/home/builder/rel/archguard-$ver.tar.gz" HEAD
+          cp packaging/archguard/PKGBUILD /home/builder/rel/
+          sum=$(sha256sum "/home/builder/rel/archguard-$ver.tar.gz" | cut -d' ' -f1)
+          # The committed placeholder must still be there (filled only after tagging).
+          grep -q "^sha256sums=('0\{64\}')" /home/builder/rel/PKGBUILD
+          sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" /home/builder/rel/PKGBUILD
+          chown -R builder: /home/builder/rel
+      - name: namcap PKGBUILD
+        run: namcap /home/builder/rel/PKGBUILD
+      - name: makepkg (host, non-root)
+        run: cd /home/builder/rel && sudo -u builder makepkg --noconfirm --cleanbuild
+      - name: namcap package
+        run: cd /home/builder/rel && namcap archguard-*.pkg.tar.zst
+      - name: Clean chroot build (devtools)
+        run: |
+          cd /home/builder/rel
+          rm -f archguard-*.pkg.tar.zst
+          sudo -u builder extra-x86_64-build -- -- --noconfirm
+          ls -l archguard-*.pkg.tar.zst
+          namcap archguard-*.pkg.tar.zst
+          pacman -Qip archguard-*.pkg.tar.zst | grep -E '^(Name|Version|Conflicts With|Depends On)'

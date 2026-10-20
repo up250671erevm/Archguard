@@ -4,7 +4,7 @@
 >
 > **EN:** Rust CLI for Arch Linux / EndeavourOS that reads the Arch news RSS feed, matches items against installed packages and **blocks the upgrade before `-Sy`** when relevant unread news exists. It is a wrapper, not a pacman hook. Later it will help merge `.pacnew` files.
 
-**Status:** Phase 3 — `check [--notify]`, `ack`, `upgrade` (+ hooks), `pacnew`, tray applet, systemd user timer.
+**Status:** v0.1.0 (release pending tag) — `check [--notify]`, `ack`, `upgrade` (+ hooks), `pacnew`, tray applet, systemd user timer. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE.md](RELEASE.md).
 
 ## Workspace
 
@@ -44,7 +44,7 @@ systemctl --user enable --now archguard-check.timer   # daily + 5 min after boot
 archguard-tray &                              # StatusNotifierItem (KDE, GNOME + AppIndicator, ...)
 ```
 
-The tray shows OK / blocking news / pending .pacnew, and offers *Check now*, *Open Arch news*, per-item *Read*/*Acknowledge*, *Acknowledge all shown*, and *Run upgrade in terminal* (`archguard upgrade`, so the same guard applies). To autostart it: `cp /usr/share/applications/archguard-tray.desktop ~/.config/autostart/`.
+The tray shows OK / blocking news / pending .pacnew, and offers *Check now*, *Open Arch news*, per-item *Read*/*Acknowledge*, *Acknowledge all shown*, and *Run upgrade in terminal* (`archguard upgrade`, so the same guard applies). To autostart it: `archguard-tray --autostart enable` (writes `~/.config/autostart/archguard-tray.desktop`; `disable` removes it). If the panel isn't up yet at login the tray waits for it; if the session bus isn't reachable it retries with backoff for 5 minutes (`--no-retry` to fail fast).
 
 Notifications use notify-rust when built with feature `archguard/notify` (the PKGBUILD does), else `notify-send`. A failed notification never changes the exit code. The service treats exit 1 ("blocking news") as success.
 
@@ -53,6 +53,7 @@ Notifications use notify-rust when built with feature `archguard/notify` (the PK
 ```toml
 [hooks]
 pre_upgrade = ["pkgwatch check", "aurscan --pre-upgrade"]
+timeout_secs = 300   # per hook; a hook that hangs is killed (SIGTERM, then SIGKILL) and blocks
 ```
 
 Run in order, as your user (never elevated), without a shell (quoting like `sh`, but `;`, `|`, `$()` are literal), only after the news check passed and before `-Syu`. Any non-zero exit — or a hook that can't be started — blocks the upgrade (fail-closed).
@@ -77,6 +78,7 @@ scan_dirs = ["/etc"]
 cache_dir = "/var/cache/pacman/pkg"
 [hooks]
 pre_upgrade = []
+timeout_secs = 300
 [tray]
 terminal = "auto"      # or konsole, gnome-terminal, kitty, alacritty, foot, xterm, ...
 interval_minutes = 360
@@ -91,7 +93,8 @@ State (acked ids): `~/.local/state/archguard/state`.
 cargo install --path crates/cli --locked --features alpm,notify
 cargo install --path crates/tray --locked --features gui,alpm
 
-# Arch (VCS package)
+# Arch: release package (after the v0.1.0 tag) or VCS package
+cd packaging/archguard && makepkg -si
 cd packaging/archguard-git && makepkg -si
 ```
 
