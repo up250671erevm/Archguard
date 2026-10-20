@@ -12,9 +12,11 @@
 
 pub mod check;
 pub mod config;
+pub mod fsutil;
 pub mod matching;
 pub mod news;
 pub mod packages;
+pub mod pacnew;
 pub mod paths;
 pub mod state;
 

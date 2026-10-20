@@ -22,3 +22,4 @@ clap = { version = "4", features = ["derive"] }
 archguard-core = { path = "../core" }
 archguard-runner = { path = "../runner" }
 archguard-merge = { path = "../merge" }
+libc = "0.2"

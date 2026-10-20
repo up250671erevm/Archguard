@@ -37,9 +37,10 @@ impl State {
         self.acked.contains(id)
     }
 
-    /// Returns true if newly inserted.
+    /// Returns true if newly inserted. Empty/whitespace ids are ignored.
     pub fn ack(&mut self, id: &str) -> bool {
-        self.acked.insert(id.to_string())
+        let id = id.trim();
+        !id.is_empty() && self.acked.insert(id.to_string())
     }
 
     /// Load; a missing file is an empty state.
@@ -51,15 +52,10 @@ impl State {
         }
     }
 
-    /// Atomically save (write temp file + rename), creating parent dirs.
+    /// Durably and atomically save: temp file, `fsync(file)`, rename over
+    /// the target, `fsync(dir)`. Creates parent dirs.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, self.serialize())
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("renaming to {}", path.display()))
+        crate::fsutil::write_durable(path, self.serialize().as_bytes())
     }
 }
 
@@ -73,6 +69,9 @@ mod tests {
         assert!(s.ack("b"));
         assert!(s.ack("a"));
         assert!(!s.ack("a"));
+        assert!(!s.ack(""));
+        assert!(!s.ack("   "));
+        assert_eq!(s.acked.len(), 2);
         let back = State::parse(&s.serialize());
         assert_eq!(back, s);
         assert!(back.is_acked("a"));
@@ -86,6 +85,7 @@ mod tests {
         s.ack("tag:x");
         s.save(&path).unwrap();
         assert_eq!(State::load(&path).unwrap(), s);
+        assert!(!path.with_extension("tmp").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

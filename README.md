@@ -4,7 +4,7 @@
 >
 > **EN:** Rust CLI for Arch Linux / EndeavourOS that reads the Arch news RSS feed, matches items against installed packages and **blocks the upgrade before `-Sy`** when relevant unread news exists. It is a wrapper, not a pacman hook. Later it will help merge `.pacnew` files.
 
-**Status:** Phase 1 — `check`, `ack`, `upgrade` implemented.
+**Status:** Phase 2 — `check`, `ack`, `upgrade`, `pacnew` implemented.
 
 ## Workspace
 
@@ -25,6 +25,16 @@ archguard ack <id|slug>... # or: archguard ack --all
 archguard upgrade [-- extra pacman/paru/yay args]
 ```
 
+### .pacnew
+
+```sh
+archguard pacnew list            # .pacnew/.pacsave under scan_dirs (default /etc)
+archguard pacnew diff /etc/pacman.conf
+archguard pacnew merge /etc/pacman.conf [--yes]
+```
+
+`merge` does a 3-way merge (base = file from the previous package version in `/var/cache/pacman/pkg`, ours = live file, theirs = `.pacnew`). A clean merge shows the diff and, after confirmation, writes the result (backup `*.archguard-bak.<time>`) and removes the `.pacnew`. On conflicts, or when no base is cached, meld or kdiff3 is launched; without them conflict markers are left in a private temp file. Only the final cp/install/mv/rm steps are elevated (sudo/run0).
+
 `upgrade` refuses to run `-Syu` while `check` is blocking. Only `pacman` is elevated (sudo/run0); paru/yay are never run as root.
 
 Config `~/.config/archguard.toml` (all optional):
@@ -39,6 +49,10 @@ min_name_len = 2
 ignore = []
 always_block = false
 max_age_days = 0
+[pacnew]
+merge_tool = "auto"    # auto | meld | kdiff3 | none
+scan_dirs = ["/etc"]
+cache_dir = "/var/cache/pacman/pkg"
 ```
 
 State (acked ids): `~/.local/state/archguard/state`.

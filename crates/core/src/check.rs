@@ -46,7 +46,7 @@ pub fn evaluate(
         })
         .filter_map(|i| {
             let packages = matched_packages(i, installed, opts);
-            (opts.always_block || !packages.is_empty()).then(|| Finding {
+            (opts.always_block || i.is_untitled() || !packages.is_empty()).then(|| Finding {
                 item: i.clone(),
                 packages,
             })
@@ -57,6 +57,10 @@ pub fn evaluate(
 
 /// Resolve an ack argument (full id or short slug) to full ids.
 pub fn resolve_ids<'a>(items: &'a [NewsItem], arg: &str) -> Vec<&'a str> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Vec::new();
+    }
     items
         .iter()
         .filter(|i| i.id == arg || i.short_id() == arg)
@@ -129,6 +133,30 @@ mod tests {
     }
 
     #[test]
+    fn untitled_items_block_fail_closed() {
+        let mut items = fixture();
+        items.push(NewsItem {
+            id: "gen-123".into(),
+            title: " ".into(),
+            summary: "body only".into(),
+            link: None,
+            published: None,
+        });
+        let r = evaluate(
+            &items,
+            &BTreeSet::new(),
+            &State::default(),
+            &Matching::default(),
+            0,
+        );
+        assert_eq!(r.findings.len(), 1);
+        assert_eq!(r.findings[0].item.id, "gen-123");
+        let mut st = State::default();
+        st.ack("gen-123");
+        assert!(!evaluate(&items, &BTreeSet::new(), &st, &Matching::default(), 0).is_blocking());
+    }
+
+    #[test]
     fn resolve_by_full_or_short() {
         let items = fixture();
         assert_eq!(resolve_ids(&items, &items[1].id).len(), 1);
@@ -137,5 +165,7 @@ mod tests {
             1
         );
         assert!(resolve_ids(&items, "nope").is_empty());
+        assert!(resolve_ids(&items, "").is_empty());
+        assert!(resolve_ids(&items, "  ").is_empty());
     }
 }
