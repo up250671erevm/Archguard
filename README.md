@@ -4,7 +4,7 @@
 >
 > **EN:** Rust CLI for Arch Linux / EndeavourOS that reads the Arch news RSS feed, matches items against installed packages and **blocks the upgrade before `-Sy`** when relevant unread news exists. It is a wrapper, not a pacman hook. Later it will help merge `.pacnew` files.
 
-**Status:** v0.1.0 (release pending tag) — `check [--notify]`, `ack`, `upgrade` (+ hooks), `pacnew`, tray applet, systemd user timer. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE.md](RELEASE.md).
+**Status:** v0.1.0 released; v0.1.1 (news-matching fixes) pending tag — `check [--notify]`, `ack`, `upgrade` (+ hooks), `pacnew`, tray applet, systemd user timer. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE.md](RELEASE.md).
 
 ## Workspace
 

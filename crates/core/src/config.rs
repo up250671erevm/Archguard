@@ -10,6 +10,8 @@
 //! min_name_len = 2       # ignore installed package names shorter than this
 //! ignore = ["linux"]     # package names that never trigger a block
 //! always_block = false   # treat every unacked news item as relevant
+//! weak_words = ["foo"]    # extra common words needing `code`/"the foo package" to match
+//! phrases = ["foo bar"]   # extra phrases that never name a package ("Arch Linux" is built in)
 //! max_age_days = 0       # only consider news newer than N days (0 = all)
 //!
 //! [pacnew]
@@ -60,6 +62,10 @@ pub struct Matching {
     pub ignore: Vec<String>,
     pub always_block: bool,
     pub max_age_days: u32,
+    /// Extra common words that only match with a strong signal (`code`, "the X package").
+    pub weak_words: Vec<String>,
+    /// Extra phrases that never name a package (e.g. "arch linux" is built in).
+    pub phrases: Vec<String>,
 }
 
 impl Default for Matching {
@@ -70,6 +76,8 @@ impl Default for Matching {
             ignore: Vec::new(),
             always_block: false,
             max_age_days: 0,
+            weak_words: Vec::new(),
+            phrases: Vec::new(),
         }
     }
 }

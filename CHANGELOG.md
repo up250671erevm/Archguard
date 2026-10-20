@@ -6,6 +6,24 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - unreleased
+
+### Fixed
+- News matching false positives: common English words that are also package
+  names (e.g. `which`, `less`, `time`, `file`) no longer match unless strongly
+  signaled — inside `backticks`/`<code>`, or explicit package context ("the X
+  package", "package X", "X package(s)"). Reported: "Breaking changes for all
+  users of varnish, which is renamed to vinyl-cache" matched `which`.
+- "Arch Linux" (and "Arch Wiki", "archlinux.org", "Linux Foundation") is
+  treated as a phrase and no longer matches `linux`. Reported: "Arch Linux 2026
+  Leader Election Results" matched `linux`.
+
+### Added
+- `[matching] weak_words` and `[matching] phrases` extend the built-in lists;
+  `ignore` and `always_block` behave as before.
+- `<code>` in news bodies is kept as backticks for matching (only with
+  `match_summary = true`); news ids are unchanged, so existing acks stay valid.
+
 ## [0.1.0] - 2026-10-20
 
 First public release.

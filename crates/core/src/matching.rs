@@ -1,23 +1,49 @@
 //! Matching news items against installed package names.
+//!
+//! Plain tokens match installed package names, except:
+//! - known phrases such as "Arch Linux" are removed first (built-in list plus
+//!   `[matching] phrases`), so they never yield `linux`/`arch`;
+//! - common English words that are also package names (`which`, `less`,
+//!   `time`, ...; built-in list plus `[matching] weak_words`) only match with a
+//!   strong signal: inside `backticks` / `<code>`, or explicit package context
+//!   ("the X package", "package X", "X package(s)").
+//!
+//! `ignore` still suppresses names; `always_block` still blocks everything.
 
 use crate::config::Matching;
 use crate::news::NewsItem;
 use std::collections::BTreeSet;
+
+/// Phrases that never name a package on their own (lowercase).
+pub const BUILTIN_PHRASES: &[&str] = &[
+    "arch linux",
+    "archlinux.org",
+    "arch wiki",
+    "linux foundation",
+];
+
+/// Common English words that are also Arch package names (lowercase).
+pub const BUILTIN_WEAK_WORDS: &[&str] = &[
+    "which", "less", "time", "file", "make", "patch", "words", "screen", "watch", "tree", "units",
+    "most", "dialog", "expect", "at", "man", "info", "help", "core", "extra", "base", "check",
+    "pass", "links", "parallel", "dash", "fish", "zip", "go", "bc", "ed", "arch",
+];
 
 /// Characters allowed in Arch package names.
 fn is_pkg_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '@' | '.' | '_' | '+' | '-')
 }
 
+fn clean(raw: &str) -> Option<String> {
+    let t = raw.trim_matches(|c| matches!(c, '.' | '-' | '_'));
+    (!t.is_empty()).then(|| t.to_ascii_lowercase())
+}
+
 /// Split text into candidate package-name tokens (lowercased).
 pub fn tokens(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for raw in text.split(|c: char| !is_pkg_char(c)) {
-        let t = raw.trim_matches(|c| matches!(c, '.' | '-' | '_'));
-        if t.is_empty() {
-            continue;
-        }
-        let lower = t.to_ascii_lowercase();
+        let Some(lower) = clean(raw) else { continue };
         // "foo>=2.0" / "foo-2.0" style: also try without a trailing version.
         if let Some(idx) = lower.rfind('-') {
             let (head, tail) = lower.split_at(idx);
@@ -26,6 +52,60 @@ pub fn tokens(text: &str) -> BTreeSet<String> {
             }
         }
         out.insert(lower);
+    }
+    out
+}
+
+/// Remove phrases (case-insensitive, word-bounded) by replacing them with spaces.
+fn strip_phrases(text: &str, phrases: &[String]) -> String {
+    let mut lower = text.to_ascii_lowercase();
+    for p in phrases {
+        let p = p.trim().to_ascii_lowercase();
+        if p.is_empty() {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(off) = lower[from..].find(&p) {
+            let start = from + off;
+            let end = start + p.len();
+            let before_ok = lower[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !is_pkg_char(c));
+            let after_ok = lower[end..].chars().next().is_none_or(|c| !is_pkg_char(c));
+            if before_ok && after_ok {
+                lower.replace_range(start..end, &" ".repeat(p.len()));
+            }
+            from = end;
+        }
+    }
+    lower
+}
+
+/// Tokens with a strong package signal: `code`, or "the X package",
+/// "package X", "X package(s)" / "X pkg".
+pub fn strong_tokens(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    // Backtick spans (HTML <code> is converted to backticks by the feed parser).
+    for (i, span) in text.split('`').enumerate() {
+        if i % 2 == 1 {
+            out.extend(tokens(span));
+        }
+    }
+    let words: Vec<String> = text
+        .split(|c: char| !is_pkg_char(c))
+        .filter_map(clean)
+        .collect();
+    let is_pkg_word = |w: &str| matches!(w, "package" | "packages" | "pkg");
+    for (i, w) in words.iter().enumerate() {
+        if is_pkg_word(w) {
+            if i > 0 && !is_pkg_word(&words[i - 1]) {
+                out.insert(words[i - 1].clone());
+            }
+            if w == "package" && i + 1 < words.len() && !is_pkg_word(&words[i + 1]) {
+                out.insert(words[i + 1].clone());
+            }
+        }
     }
     out
 }
@@ -41,8 +121,20 @@ pub fn matched_packages(
         text.push(' ');
         text.push_str(&item.summary);
     }
-    tokens(&text)
+    let strong = strong_tokens(&text);
+    let phrases: Vec<String> = BUILTIN_PHRASES
+        .iter()
+        .map(|s| s.to_string())
+        .chain(opts.phrases.iter().cloned())
+        .collect();
+    let plain = tokens(&strip_phrases(&text, &phrases));
+    let weak = |t: &str| {
+        BUILTIN_WEAK_WORDS.contains(&t) || opts.weak_words.iter().any(|w| w.eq_ignore_ascii_case(t))
+    };
+    plain
         .into_iter()
+        .filter(|t| !weak(t))
+        .chain(strong)
         .filter(|t| t.len() >= opts.min_name_len)
         .filter(|t| installed.contains(t))
         .filter(|t| !opts.ignore.iter().any(|i| i.eq_ignore_ascii_case(t)))
@@ -116,5 +208,109 @@ mod tests {
             matched_packages(&i, &inst, &Matching::default()),
             set(&["nvidia"])
         );
+    }
+
+    fn real_installed() -> BTreeSet<String> {
+        set(&[
+            "which",
+            "less",
+            "linux",
+            "linux-firmware",
+            "glibc",
+            "grub",
+            "openssh",
+            "iptables",
+            "iptables-nft",
+            "nftables",
+            "pacman",
+            "arch-install-scripts",
+        ])
+    }
+
+    fn m(title: &str) -> BTreeSet<String> {
+        matched_packages(&item(title, ""), &real_installed(), &Matching::default())
+    }
+
+    #[test]
+    fn reported_false_positives() {
+        assert!(
+            m("Breaking changes for all users of varnish, which is renamed to vinyl-cache")
+                .is_empty()
+        );
+        assert!(m("Arch Linux 2026 Leader Election Results").is_empty());
+        assert!(m("Arch Linux news: less is more").is_empty());
+    }
+
+    #[test]
+    fn real_arch_news_titles() {
+        assert_eq!(
+            m("iptables now defaults to the nft backend"),
+            set(&["iptables"])
+        );
+        assert_eq!(
+            m("linux-firmware >= 20250508.788aadc8-2 requires manual intervention"),
+            set(&["linux-firmware"])
+        );
+        assert_eq!(
+            m("Glibc 2.41 corrupting Discord installation"),
+            set(&["glibc"])
+        );
+        assert_eq!(
+            m("Grub bootloader upgrade and configuration incompatibilities"),
+            set(&["grub"])
+        );
+        assert_eq!(
+            m("OpenSSH service restart after upgrading to 9.8p1"),
+            set(&["openssh"])
+        );
+        assert_eq!(
+            m("Manual intervention for pacman 7.0.0 and local repositories"),
+            set(&["pacman"])
+        );
+        assert_eq!(m("linux 6.20 drops support for old CPUs"), set(&["linux"]));
+        assert_eq!(m("Arch Linux: linux-lts users read this"), BTreeSet::new());
+    }
+
+    #[test]
+    fn weak_words_need_strong_signal() {
+        assert_eq!(m("The which package moved to core"), set(&["which"]));
+        assert_eq!(m("package which is deprecated"), set(&["which"]));
+        assert_eq!(m("Replace `which` with command -v"), set(&["which"]));
+        assert_eq!(m("which packages need a rebuild"), set(&["which"]));
+        let opts = Matching {
+            match_summary: true,
+            ..Default::default()
+        };
+        let i = item("Tooling news", "Use `less` 680 or newer");
+        assert_eq!(
+            matched_packages(&i, &real_installed(), &opts),
+            set(&["less"])
+        );
+        let i = item("Tooling news", "read less, do more");
+        assert!(matched_packages(&i, &real_installed(), &opts).is_empty());
+    }
+
+    #[test]
+    fn configurable_weak_words_phrases_ignore() {
+        let inst = real_installed();
+        let opts = Matching {
+            weak_words: vec!["GRUB".into()],
+            ..Default::default()
+        };
+        assert!(matched_packages(&item("grub update", ""), &inst, &opts).is_empty());
+        assert_eq!(
+            matched_packages(&item("the grub package", ""), &inst, &opts),
+            set(&["grub"])
+        );
+        let opts = Matching {
+            phrases: vec!["OpenSSH Summit".into()],
+            ..Default::default()
+        };
+        assert!(matched_packages(&item("OpenSSH Summit 2026", ""), &inst, &opts).is_empty());
+        let opts = Matching {
+            ignore: vec!["which".into()],
+            ..Default::default()
+        };
+        assert!(matched_packages(&item("the `which` package", ""), &inst, &opts).is_empty());
     }
 }

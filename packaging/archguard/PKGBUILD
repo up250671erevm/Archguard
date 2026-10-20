@@ -6,7 +6,7 @@
 #   packaging/update-release-checksums.sh <version>
 # (or `updpkgsums` + `makepkg --printsrcinfo > .SRCINFO`). See RELEASE.md.
 pkgname=archguard
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Blocks Arch Linux upgrades when relevant Arch news needs attention"
 arch=('x86_64')
@@ -22,7 +22,7 @@ optdepends=('meld: graphical 3-way .pacnew merge'
 conflicts=('archguard-git')
 options=('!lto' '!debug')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('a30f22021bcb17cf5b5b32ed4087a8c9811c8f7548045ea0baa01f0cff8b7a07')
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 _srcdir="Archguard-$pkgver"
 _features='archguard/alpm,archguard/notify,archguard-tray/alpm,archguard-tray/gui'
 
