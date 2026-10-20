@@ -46,7 +46,7 @@ pub fn evaluate(
         })
         .filter_map(|i| {
             let packages = matched_packages(i, installed, opts);
-            (opts.always_block || !packages.is_empty()).then(|| Finding {
+            (opts.always_block || i.is_untitled() || !packages.is_empty()).then(|| Finding {
                 item: i.clone(),
                 packages,
             })
@@ -130,6 +130,30 @@ mod tests {
         let r = evaluate(&items, &BTreeSet::new(), &State::default(), &opts, now);
         // The 2025 item is too old.
         assert_eq!(r.findings.len(), 2);
+    }
+
+    #[test]
+    fn untitled_items_block_fail_closed() {
+        let mut items = fixture();
+        items.push(NewsItem {
+            id: "gen-123".into(),
+            title: " ".into(),
+            summary: "body only".into(),
+            link: None,
+            published: None,
+        });
+        let r = evaluate(
+            &items,
+            &BTreeSet::new(),
+            &State::default(),
+            &Matching::default(),
+            0,
+        );
+        assert_eq!(r.findings.len(), 1);
+        assert_eq!(r.findings[0].item.id, "gen-123");
+        let mut st = State::default();
+        st.ack("gen-123");
+        assert!(!evaluate(&items, &BTreeSet::new(), &st, &Matching::default(), 0).is_blocking());
     }
 
     #[test]

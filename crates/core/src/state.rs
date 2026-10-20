@@ -52,15 +52,10 @@ impl State {
         }
     }
 
-    /// Atomically save (write temp file + rename), creating parent dirs.
+    /// Durably and atomically save: temp file, `fsync(file)`, rename over
+    /// the target, `fsync(dir)`. Creates parent dirs.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        let tmp = path.with_extension("tmp");
-        std::fs::write(&tmp, self.serialize())
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, path).with_context(|| format!("renaming to {}", path.display()))
+        crate::fsutil::write_durable(path, self.serialize().as_bytes())
     }
 }
 

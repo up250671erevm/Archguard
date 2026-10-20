@@ -102,6 +102,53 @@ pub fn resolve_pair(file: &Path) -> Result<(PathBuf, PathBuf)> {
     }
 }
 
+/// Resolve a live config path, following a symlink to its real file so we
+/// write *through* it and never replace the link. Refuses non-regular files.
+pub fn resolve_target(target: &Path) -> Result<PathBuf> {
+    let md =
+        std::fs::symlink_metadata(target).with_context(|| format!("stat {}", target.display()))?;
+    let real = if md.file_type().is_symlink() {
+        std::fs::canonicalize(target).with_context(|| {
+            format!(
+                "{} is a dangling symlink; refusing to merge",
+                target.display()
+            )
+        })?
+    } else {
+        target.to_path_buf()
+    };
+    let md = std::fs::metadata(&real)?;
+    if !md.is_file() {
+        bail!(
+            "{} is not a regular file; refusing to merge",
+            real.display()
+        );
+    }
+    Ok(real)
+}
+
+fn ensure_not_symlink(p: &Path) -> Result<()> {
+    if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+        bail!("{} is a symlink; refusing to replace it", p.display());
+    }
+    Ok(())
+}
+
+/// Removes scratch files on drop.
+struct Scratch(Vec<PathBuf>);
+impl Scratch {
+    fn keep(&mut self, p: &Path) {
+        self.0.retain(|x| x != p);
+    }
+}
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 fn read(p: &Path) -> Result<String> {
     let b = std::fs::read(p).with_context(|| format!("reading {}", p.display()))?;
     String::from_utf8(b).with_context(|| format!("{} is not UTF-8 text", p.display()))
@@ -171,6 +218,8 @@ pub fn install(
     pacnew: &Path,
     content: &str,
 ) -> Result<PathBuf> {
+    ensure_not_symlink(target)?;
+    ensure_not_symlink(pacnew)?;
     let meta = std::fs::metadata(target).with_context(|| format!("stat {}", target.display()))?;
     let name = target
         .file_name()
@@ -214,6 +263,18 @@ pub fn install(
                 s(&staged),
             ],
         ),
+        // Carry over xattrs / ACLs / SELinux labels from the original.
+        elevated(
+            ctx,
+            "cp",
+            vec![
+                "--attributes-only".into(),
+                "--preserve=all".into(),
+                "--".into(),
+                s(target),
+                s(&staged),
+            ],
+        ),
         elevated(
             ctx,
             "mv",
@@ -254,7 +315,17 @@ pub fn cmd_merge(
     yes: bool,
     out: &mut dyn Write,
 ) -> Result<MergeOutcome> {
-    let (target, pacnew) = resolve_pair(file)?;
+    let (link, pacnew) = resolve_pair(file)?;
+    ensure_not_symlink(&pacnew)?;
+    let target = resolve_target(&link)?;
+    if target != link {
+        writeln!(
+            out,
+            "{} is a symlink; merging into its real target {}",
+            link.display(),
+            target.display()
+        )?;
+    }
     let ours = read(&target)?;
     let theirs = read(&pacnew)?;
     let name = target
@@ -279,7 +350,7 @@ pub fn cmd_merge(
         return Ok(MergeOutcome::NothingToDo);
     }
 
-    let base = find_base(&target, ctx.owner, &ctx.cache, ctx.extractor)?.and_then(|b| {
+    let base = find_base(&link, ctx.owner, &ctx.cache, ctx.extractor)?.and_then(|b| {
         String::from_utf8(b.content)
             .map(|c| (c, b.package))
             .map_err(|_| "base file is not UTF-8".to_string())
@@ -310,10 +381,12 @@ pub fn cmd_merge(
             let out_p = ctx.tmpdir.join(format!("{name}.merged"));
             std::fs::write(&ours_p, &ours)?;
             std::fs::write(&theirs_p, &theirs)?;
+            let mut scratch = Scratch(vec![ours_p.clone(), theirs_p.clone(), out_p.clone()]);
             let base_p = match &base {
                 Ok((b, _)) => {
                     let p = ctx.tmpdir.join(format!("{name}.base"));
                     std::fs::write(&p, b)?;
+                    scratch.0.push(p.clone());
                     Some(p)
                 }
                 Err(_) => None,
@@ -325,10 +398,14 @@ pub fn cmd_merge(
                     writeln!(out, "launching {}: {cmd}", tool.bin())?;
                     let code = ctx.runner.run(&cmd)?;
                     let r = read(&out_p).unwrap_or_default();
-                    if code != 0 || r.is_empty() || has_markers(&r) {
+                    // Closing the tool without saving leaves the prefilled
+                    // current file; meld's middle pane starts from base.
+                    let unchanged = r == ours || base.as_ref().is_ok_and(|(b, _)| *b == r);
+                    if code != 0 || r.is_empty() || has_markers(&r) || unchanged {
                         writeln!(
                             out,
-                            "{} did not produce a resolved file; nothing written.",
+                            "{} did not produce a resolved file (not saved, unchanged, or still \
+                             conflicted); nothing written, .pacnew kept.",
                             tool.bin()
                         )?;
                         return Ok(MergeOutcome::Declined);
@@ -338,6 +415,7 @@ pub fn cmd_merge(
                 None => match &base {
                     Ok((b, _)) => {
                         std::fs::write(&out_p, merge3(b, &ours, &theirs).text)?;
+                        scratch.keep(&out_p);
                         writeln!(
                             out,
                             "No merge tool (meld/kdiff3) available. Conflicts left in {}.\n\
@@ -382,6 +460,7 @@ pub fn cmd_merge(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use archguard_core::pacnew::Entry;
     use archguard_runner::MockRunner;
     use std::collections::HashMap;
 
@@ -396,11 +475,12 @@ mod tests {
     /// Fake package cache: archive path -> {member -> content}.
     struct FakeCache(HashMap<PathBuf, HashMap<String, Vec<u8>>>);
     impl Extractor for FakeCache {
-        fn extract(&self, a: &Path, m: &str) -> Result<Vec<u8>> {
+        fn entry(&self, a: &Path, m: &str) -> Result<Entry> {
             self.0
                 .get(a)
                 .and_then(|x| x.get(m))
                 .cloned()
+                .map(Entry::File)
                 .context("member not in archive")
         }
     }
@@ -448,7 +528,18 @@ mod tests {
         tool: Option<Tool>,
         writable: bool,
         answer: bool,
-        runner: &mut MockRunner,
+        runner: &mut dyn CommandRunner,
+    ) -> (MergeOutcome, String) {
+        run_merge_yes(fx, tool, writable, answer, false, runner)
+    }
+
+    fn run_merge_yes(
+        fx: &Fx,
+        tool: Option<Tool>,
+        writable: bool,
+        answer: bool,
+        yes: bool,
+        runner: &mut dyn CommandRunner,
     ) -> (MergeOutcome, String) {
         let mut confirm = |_: &str| answer;
         let w = move |_: &Path| writable;
@@ -467,7 +558,7 @@ mod tests {
             now: 1234,
         };
         let mut out = Vec::new();
-        let r = cmd_merge(&mut ctx, &fx.target, false, &mut out).unwrap();
+        let r = cmd_merge(&mut ctx, &fx.target, yes, &mut out).unwrap();
         (r, String::from_utf8(out).unwrap())
     }
 
@@ -514,7 +605,8 @@ mod tests {
         let (o, _) = run_merge(&fx, None, false, true, &mut r);
         assert!(matches!(o, MergeOutcome::Installed { .. }));
         let progs: Vec<_> = r.calls.iter().map(|c| c.args[0].as_str()).collect();
-        assert_eq!(progs, ["cp", "install", "mv", "rm"]);
+        assert_eq!(progs, ["cp", "install", "cp", "mv", "rm"]);
+        assert!(r.calls[2].args.contains(&"--attributes-only".to_string()));
         assert!(r.calls.iter().all(|c| c.program == "sudo"));
         // Staged merged content was prepared by the user, not as root.
         let install = &r.calls[1];
@@ -543,16 +635,171 @@ mod tests {
         std::fs::remove_dir_all(&fx.dir).unwrap();
     }
 
+    /// Simulates a GUI tool by writing to the output file (last path arg).
+    struct ToolSim<F: FnMut(&Path)> {
+        f: F,
+        calls: Vec<CommandSpec>,
+    }
+    impl<F: FnMut(&Path)> CommandRunner for ToolSim<F> {
+        fn run(&mut self, cmd: &CommandSpec) -> Result<i32> {
+            self.calls.push(cmd.clone());
+            let out = cmd
+                .args
+                .iter()
+                .find_map(|a| a.strip_prefix("--output="))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(cmd.args.last().unwrap()));
+            (self.f)(&out);
+            Ok(0)
+        }
+    }
+
+    const OURS_C: &str = "a\nX\nc\nd\ne\n";
+    const THEIRS_C: &str = "a\nY\nc\nd\ne\n";
+
     #[test]
-    fn conflict_with_tool_launches_3way() {
-        let fx = fixture("tool", B, "a\nX\nc\nd\ne\n", "a\nY\nc\nd\ne\n");
-        let mut r = MockRunner::default();
-        // Mock tool "resolves" nothing (out == ours, no markers) -> accepted.
-        let (o, _) = run_merge(&fx, Some(Tool::Kdiff3), true, true, &mut r);
+    fn tool_closed_without_saving_keeps_pacnew() {
+        for yes in [false, true] {
+            let fx = fixture(&format!("nosave{yes}"), B, OURS_C, THEIRS_C);
+            let mut r = ToolSim {
+                f: |_: &Path| {},
+                calls: vec![],
+            };
+            let (o, text) = run_merge_yes(&fx, Some(Tool::Kdiff3), true, true, yes, &mut r);
+            assert_eq!(o, MergeOutcome::Declined, "{text}");
+            assert_eq!(r.calls[0].program, "kdiff3");
+            assert!(r.calls[0].args[0].ends_with("foo.conf.base"));
+            assert!(fx.dir.join("etc/foo.conf.pacnew").exists());
+            assert_eq!(std::fs::read_to_string(&fx.target).unwrap(), OURS_C);
+            std::fs::remove_dir_all(&fx.dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn tool_saving_base_is_declined() {
+        let fx = fixture("savebase", B, OURS_C, THEIRS_C);
+        let mut r = ToolSim {
+            f: |p: &Path| std::fs::write(p, B).unwrap(),
+            calls: vec![],
+        };
+        let (o, _) = run_merge_yes(&fx, Some(Tool::Meld), true, true, true, &mut r);
+        assert_eq!(o, MergeOutcome::Declined);
+        assert!(r.calls[0].args[0].starts_with("--output="));
+        assert!(fx.dir.join("etc/foo.conf.pacnew").exists());
+        std::fs::remove_dir_all(&fx.dir).unwrap();
+    }
+
+    #[test]
+    fn tool_resolution_is_installed_and_scratch_cleaned() {
+        let fx = fixture("resolved", B, OURS_C, THEIRS_C);
+        let mut r = ToolSim {
+            f: |p: &Path| std::fs::write(p, "a\nXY\nc\nd\ne\n").unwrap(),
+            calls: vec![],
+        };
+        let (o, _) = run_merge(&fx, Some(Tool::Meld), true, true, &mut r);
         assert!(matches!(o, MergeOutcome::Installed { .. }));
-        assert_eq!(r.calls[0].program, "kdiff3");
-        assert_eq!(r.calls[0].args.len(), 5);
-        assert!(r.calls[0].args[0].ends_with("foo.conf.base"));
+        assert_eq!(
+            std::fs::read_to_string(&fx.target).unwrap(),
+            "a\nXY\nc\nd\ne\n"
+        );
+        assert!(!fx.dir.join("etc/foo.conf.pacnew").exists());
+        let left: Vec<_> = std::fs::read_dir(fx.dir.join("tmp")).unwrap().collect();
+        assert!(left.is_empty(), "scratch not cleaned: {left:?}");
+        std::fs::remove_dir_all(&fx.dir).unwrap();
+    }
+
+    #[test]
+    fn tool_leaving_markers_is_declined() {
+        let fx = fixture("markers", B, OURS_C, THEIRS_C);
+        let mut r = ToolSim {
+            f: |p: &Path| std::fs::write(p, "<<<<<<< a\nX\n=======\nY\n>>>>>>> b\n").unwrap(),
+            calls: vec![],
+        };
+        let (o, _) = run_merge(&fx, Some(Tool::Meld), true, true, &mut r);
+        assert_eq!(o, MergeOutcome::Declined);
+        std::fs::remove_dir_all(&fx.dir).unwrap();
+    }
+
+    /// Turn fx.target into a symlink to `real/foo.conf`.
+    fn symlinkify(fx: &Fx) -> PathBuf {
+        let real_dir = fx.dir.join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        let real = real_dir.join("foo.conf");
+        std::fs::rename(&fx.target, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &fx.target).unwrap();
+        real
+    }
+
+    #[test]
+    fn symlink_target_written_through_direct() {
+        let fx = fixture("symdirect", B, "A\nb\nc\nd\ne\n", "a\nb\nc\nd\nE\n");
+        let real = symlinkify(&fx);
+        let mut r = MockRunner::default();
+        let (o, text) = run_merge(&fx, None, true, true, &mut r);
+        assert!(matches!(o, MergeOutcome::Installed { .. }), "{text}");
+        assert!(text.contains("is a symlink"));
+        assert!(std::fs::symlink_metadata(&fx.target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "A\nb\nc\nd\nE\n");
+        assert_eq!(
+            std::fs::read_to_string(&fx.target).unwrap(),
+            "A\nb\nc\nd\nE\n"
+        );
+        std::fs::remove_dir_all(&fx.dir).unwrap();
+    }
+
+    #[test]
+    fn symlink_target_written_through_elevated() {
+        let fx = fixture("symelev", B, "A\nb\nc\nd\ne\n", "a\nb\nc\nd\nE\n");
+        let real = std::fs::canonicalize(symlinkify(&fx)).unwrap();
+        let mut r = MockRunner::default();
+        let (o, _) = run_merge(&fx, None, false, true, &mut r);
+        assert!(matches!(o, MergeOutcome::Installed { .. }));
+        let real_s = real.display().to_string();
+        let link_s = fx.target.display().to_string();
+        let mv = &r.calls[3];
+        assert_eq!(mv.args[0], "mv");
+        assert_eq!(mv.args.last().unwrap(), &real_s);
+        assert!(
+            r.calls.iter().all(|c| !c.args.contains(&link_s)),
+            "link must not be touched"
+        );
+        std::fs::remove_dir_all(&fx.dir).unwrap();
+    }
+
+    #[test]
+    fn dangling_symlink_and_install_on_symlink_refused() {
+        let fx = fixture("dangle", B, "a\n", "b\n");
+        std::fs::remove_file(&fx.target).unwrap();
+        std::os::unix::fs::symlink(fx.dir.join("missing"), &fx.target).unwrap();
+        let mut r = MockRunner::default();
+        let mut c = |_: &str| true;
+        let w = |_: &Path| true;
+        let mut ctx = PacnewCtx {
+            scan_dirs: vec![],
+            owner: &FakeOwner,
+            extractor: &fx.ex,
+            cache: vec![],
+            runner: &mut r,
+            confirm: &mut c,
+            tool: None,
+            elevation: Elevation::Sudo,
+            is_root: false,
+            tmpdir: fx.dir.join("tmp"),
+            writable: &w,
+            now: 0,
+        };
+        let err = cmd_merge(&mut ctx, &fx.target, true, &mut Vec::new()).unwrap_err();
+        assert!(format!("{err:#}").contains("dangling symlink"));
+        let pn = fx.dir.join("etc/foo.conf.pacnew");
+        let err = install(&mut ctx, &fx.target, &pn, "x").unwrap_err();
+        assert!(format!("{err:#}").contains("symlink"));
+        assert!(std::fs::symlink_metadata(&fx.target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         std::fs::remove_dir_all(&fx.dir).unwrap();
     }
 

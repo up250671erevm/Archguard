@@ -112,7 +112,12 @@ fn print_report(r: &Report, out: &mut dyn Write) -> Result<()> {
     )?;
     for f in &r.findings {
         let pkgs: Vec<_> = f.packages.iter().map(String::as_str).collect();
-        writeln!(out, "  * [{}] {}", f.item.short_id(), f.item.title)?;
+        writeln!(
+            out,
+            "  * [{}] {}",
+            f.item.short_id(),
+            f.item.display_title()
+        )?;
         if !pkgs.is_empty() {
             writeln!(out, "      affects installed: {}", pkgs.join(", "))?;
         }

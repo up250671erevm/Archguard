@@ -38,6 +38,23 @@ impl NewsItem {
     }
 }
 
+impl NewsItem {
+    /// Items without a usable title can't be matched; they are treated as
+    /// potentially relevant (fail-closed).
+    pub fn is_untitled(&self) -> bool {
+        self.title.trim().is_empty()
+    }
+
+    /// Title for display.
+    pub fn display_title(&self) -> &str {
+        if self.is_untitled() {
+            "(untitled news item — review manually)"
+        } else {
+            &self.title
+        }
+    }
+}
+
 /// Very small HTML tag stripper sufficient for matching purposes.
 pub fn strip_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -74,9 +91,6 @@ pub fn parse_feed(bytes: &[u8]) -> Result<Vec<NewsItem>> {
                 .or_else(|| e.content.and_then(|c| c.body))
                 .unwrap_or_default();
             let title = e.title.map(|t| t.content).unwrap_or_default();
-            if title.trim().is_empty() && link.is_none() {
-                return None; // nothing a user could read or ack meaningfully
-            }
             let published = e.published.or(e.updated).map(|d| d.timestamp());
             // Empty GUIDs: fall back to link, then title+date; skip if nothing usable.
             let id = [Some(e.id), link.clone()]
@@ -181,7 +195,9 @@ mod tests {
         assert_eq!(ids.len(), items.len(), "ids must be unique: {items:?}");
         assert!(items.iter().any(|i| i.title == "No guid"));
         assert!(items.iter().any(|i| i.title == "Only title"));
-        assert!(items.iter().all(|i| !i.title.is_empty()));
+        // Fail-closed: the item without title/link is kept, not dropped.
+        assert_eq!(items.len(), 3);
+        assert_eq!(items.iter().filter(|i| i.is_untitled()).count(), 1);
     }
 
     #[test]

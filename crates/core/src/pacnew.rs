@@ -264,35 +264,132 @@ impl Owner for PacmanOwner {
     }
 }
 
-/// Extracts a single member from a package archive.
-pub trait Extractor {
-    fn extract(&self, archive: &Path, member: &str) -> Result<Vec<u8>>;
+/// A member of a package archive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    /// Regular file with its content.
+    File(Vec<u8>),
+    /// Symbolic link with its (raw) target.
+    Symlink(String),
+    /// Hard link to another archive member path.
+    Hardlink(String),
+    /// Directory, device, fifo, ...
+    Other,
 }
 
-/// Uses `bsdtar` (libarchive, part of pacman's deps) and falls back to `tar`.
+/// Reads members of a package archive.
+pub trait Extractor {
+    fn entry(&self, archive: &Path, member: &str) -> Result<Entry>;
+}
+
+/// Characters bsdtar would interpret as a pattern in member names.
+pub fn has_glob(member: &str) -> bool {
+    member.contains(['*', '?', '[', ']', '\\'])
+}
+
+/// Parse one `tar -tv` listing line for `member`.
+pub fn parse_listing(line: &str, member: &str) -> Option<Entry> {
+    let kind = line.chars().next()?;
+    let after_name = |sep: &str| {
+        let needle = format!("{member}{sep}");
+        line.find(&needle)
+            .map(|i| line[i + needle.len()..].trim_end().to_string())
+    };
+    Some(match kind {
+        '-' => Entry::File(Vec::new()),
+        'l' => Entry::Symlink(after_name(" -> ")?),
+        'h' => Entry::Hardlink(after_name(" link to ")?),
+        _ => Entry::Other,
+    })
+}
+
+/// Uses `bsdtar` (libarchive, a pacman dependency), falling back to GNU `tar`.
+/// Compression (zst/xz/gz/...) is auto-detected by both.
 pub struct TarExtractor;
 
+impl TarExtractor {
+    fn run(tool: &str, args: &[&std::ffi::OsStr]) -> Option<std::process::Output> {
+        std::process::Command::new(tool).args(args).output().ok()
+    }
+}
+
 impl Extractor for TarExtractor {
-    fn extract(&self, archive: &Path, member: &str) -> Result<Vec<u8>> {
-        let mut last = None;
-        for tool in ["bsdtar", "tar"] {
-            match std::process::Command::new(tool)
-                .arg("-xOf")
-                .arg(archive)
-                .arg(member)
-                .output()
-            {
-                Ok(o) if o.status.success() => return Ok(o.stdout),
-                Ok(o) => last = Some(String::from_utf8_lossy(&o.stderr).into_owned()),
-                Err(_) => continue,
+    fn entry(&self, archive: &Path, member: &str) -> Result<Entry> {
+        if has_glob(member) {
+            bail!("refusing archive member with glob characters: {member}");
+        }
+        let a = archive.as_os_str();
+        let m = std::ffi::OsStr::new(member);
+        let mut last = String::from("no tar/bsdtar available");
+        for (tool, extra) in [("bsdtar", None), ("tar", Some("--no-wildcards"))] {
+            let flag = |f: &'static str| std::ffi::OsStr::new(f);
+            let mut list = vec![];
+            list.extend(extra.map(flag));
+            list.extend([flag("-tvf"), a, flag("--"), m]);
+            let Some(o) = Self::run(tool, &list) else {
+                continue;
+            };
+            if !o.status.success() {
+                last = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                continue;
+            }
+            let listing = String::from_utf8_lossy(&o.stdout);
+            let Some(entry) = listing.lines().find_map(|l| parse_listing(l, member)) else {
+                bail!("{member} not found in {}", archive.display());
+            };
+            if entry != Entry::File(Vec::new()) {
+                return Ok(entry);
+            }
+            let mut ex = vec![];
+            ex.extend(extra.map(flag));
+            ex.extend([flag("-xOf"), a, flag("--"), m]);
+            match Self::run(tool, &ex) {
+                Some(o) if o.status.success() => return Ok(Entry::File(o.stdout)),
+                Some(o) => last = String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                None => {}
             }
         }
-        bail!(
-            "could not extract {member} from {}: {}",
-            archive.display(),
-            last.unwrap_or_else(|| "no tar/bsdtar available".into())
-        )
+        bail!("could not read {member} from {}: {last}", archive.display())
     }
+}
+
+/// Resolve a link `target` found at archive member `from` to a member path.
+/// Absolute targets are relative to the package root. `None` if it escapes.
+pub fn resolve_link(from: &str, target: &str, hard: bool) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    if !hard && !target.starts_with('/') {
+        parts.extend(from.split('/').filter(|p| !p.is_empty()));
+        parts.pop();
+    }
+    for c in target.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            c => parts.push(c),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// Maximum symlink hops followed inside an archive.
+pub const MAX_LINK_HOPS: usize = 8;
+
+/// Read a regular-file member, following links inside the archive.
+pub fn read_member(ex: &dyn Extractor, archive: &Path, member: &str) -> Result<Vec<u8>> {
+    let mut cur = member.to_string();
+    for _ in 0..=MAX_LINK_HOPS {
+        let (t, hard) = match ex.entry(archive, &cur)? {
+            Entry::File(c) => return Ok(c),
+            Entry::Other => bail!("{cur} in {} is not a regular file", archive.display()),
+            Entry::Symlink(t) => (t, false),
+            Entry::Hardlink(t) => (t, true),
+        };
+        cur = resolve_link(&cur, &t, hard)
+            .with_context(|| format!("link {cur} -> {t} escapes the package"))?;
+    }
+    bail!("too many links resolving {member} in {}", archive.display())
 }
 
 /// Where a merge base came from.
@@ -322,7 +419,7 @@ pub fn find_base(
     };
     let member = target.to_string_lossy();
     let member = member.trim_start_matches('/');
-    match extractor.extract(&prev.path, member) {
+    match read_member(extractor, &prev.path, member) {
         Ok(content) => Ok(Ok(Base {
             content,
             package: prev,
@@ -435,9 +532,9 @@ mod tests {
             Ok(self.0.clone())
         }
     }
-    struct FakeExtractor(HashMap<(PathBuf, String), Vec<u8>>);
+    struct FakeExtractor(HashMap<(PathBuf, String), Entry>);
     impl Extractor for FakeExtractor {
-        fn extract(&self, a: &Path, m: &str) -> Result<Vec<u8>> {
+        fn entry(&self, a: &Path, m: &str) -> Result<Entry> {
             self.0
                 .get(&(a.to_path_buf(), m.to_string()))
                 .cloned()
@@ -451,7 +548,7 @@ mod tests {
         let ex = FakeExtractor(
             [(
                 (cache[0].path.clone(), "etc/foo.conf".into()),
-                b"base\n".to_vec(),
+                Entry::File(b"base\n".to_vec()),
             )]
             .into(),
         );
@@ -472,28 +569,175 @@ mod tests {
     }
 
     #[test]
-    fn tar_extractor_real_archive() {
-        // Build an uncompressed .pkg.tar with system tar, if available.
-        let d = std::env::temp_dir().join(format!("ag-tar-{}", std::process::id()));
+    fn symlink_members_followed_or_no_base() {
+        let a = PathBuf::from("/c/foo-1.0-1-any.pkg.tar.zst");
+        let k = |m: &str| (a.clone(), m.to_string());
+        let ex = FakeExtractor(
+            [
+                (
+                    k("etc/foo.conf"),
+                    Entry::Symlink("../usr/share/foo/foo.conf".into()),
+                ),
+                (k("usr/share/foo/foo.conf"), Entry::File(b"real\n".to_vec())),
+                (
+                    k("etc/abs.conf"),
+                    Entry::Symlink("/usr/share/foo/foo.conf".into()),
+                ),
+                (
+                    k("etc/hard.conf"),
+                    Entry::Hardlink("usr/share/foo/foo.conf".into()),
+                ),
+                (
+                    k("etc/escape.conf"),
+                    Entry::Symlink("../../../../etc/shadow".into()),
+                ),
+                (k("etc/dangling.conf"), Entry::Symlink("nope".into())),
+                (k("etc/loop1"), Entry::Symlink("loop2".into())),
+                (k("etc/loop2"), Entry::Symlink("loop1".into())),
+                (k("etc/dir"), Entry::Other),
+            ]
+            .into(),
+        );
+        for m in ["etc/foo.conf", "etc/abs.conf", "etc/hard.conf"] {
+            assert_eq!(read_member(&ex, &a, m).unwrap(), b"real\n", "{m}");
+        }
+        for m in [
+            "etc/escape.conf",
+            "etc/dangling.conf",
+            "etc/loop1",
+            "etc/dir",
+        ] {
+            assert!(read_member(&ex, &a, m).is_err(), "{m}");
+        }
+        // find_base reports "no base" (never an empty base) for a bad link.
+        let cache = vec![CachedPkg {
+            path: a.clone(),
+            name: "foo".into(),
+            version: "1.0-1".into(),
+        }];
+        let own = FakeOwner(Some(("foo".into(), "2.0-1".into())));
+        assert!(
+            find_base(Path::new("/etc/dangling.conf"), &own, &cache, &ex)
+                .unwrap()
+                .is_err()
+        );
+        let b = find_base(Path::new("/etc/foo.conf"), &own, &cache, &ex)
+            .unwrap()
+            .unwrap();
+        assert_eq!(b.content, b"real\n");
+    }
+
+    #[test]
+    fn link_resolution() {
+        assert_eq!(
+            resolve_link("etc/a/b", "c", false).as_deref(),
+            Some("etc/a/c")
+        );
+        assert_eq!(
+            resolve_link("etc/a/b", "../c", false).as_deref(),
+            Some("etc/c")
+        );
+        assert_eq!(
+            resolve_link("etc/b", "/usr/x", false).as_deref(),
+            Some("usr/x")
+        );
+        assert_eq!(
+            resolve_link("etc/b", "usr/x", true).as_deref(),
+            Some("usr/x")
+        );
+        assert_eq!(resolve_link("etc/b", "../../x", false), None);
+    }
+
+    #[test]
+    fn listing_parse_and_globs() {
+        let m = "etc/foo.conf";
+        assert_eq!(
+            parse_listing(
+                "lrwxrwxrwx  0 root root 0 Jan  1  2026 etc/foo.conf -> ../x y",
+                m
+            ),
+            Some(Entry::Symlink("../x y".into()))
+        );
+        assert_eq!(
+            parse_listing(
+                "hrw-r--r--  0 root root 0 Jan  1  2026 etc/foo.conf link to usr/x",
+                m
+            ),
+            Some(Entry::Hardlink("usr/x".into()))
+        );
+        assert_eq!(
+            parse_listing("-rw-r--r--  0 root root 5 Jan  1  2026 etc/foo.conf", m),
+            Some(Entry::File(vec![]))
+        );
+        assert_eq!(
+            parse_listing("drwxr-xr-x 0 root root 0 Jan 1 2026 etc/", m),
+            Some(Entry::Other)
+        );
+        assert!(has_glob("etc/*.conf") && has_glob("etc/a[1]") && !has_glob("etc/a.conf"));
+        assert!(TarExtractor
+            .entry(Path::new("/x.pkg.tar"), "etc/*")
+            .is_err());
+    }
+
+    fn have(tool: &str) -> bool {
+        std::process::Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    }
+
+    /// Real archives: plain, .zst and .xz, with a symlink member.
+    #[test]
+    fn tar_extractor_real_archives() {
+        let d = std::env::temp_dir().join(format!("ag-tarz-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("root/etc")).unwrap();
-        std::fs::write(d.join("root/etc/foo.conf"), "hello\n").unwrap();
-        let archive = d.join("foo-1.0-1-any.pkg.tar");
-        let ok = std::process::Command::new("tar")
-            .arg("-cf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(d.join("root"))
-            .arg("etc/foo.conf")
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            let got = TarExtractor.extract(&archive, "etc/foo.conf").unwrap();
-            assert_eq!(got, b"hello\n");
-            assert!(TarExtractor.extract(&archive, "etc/missing").is_err());
-            let cache = list_cache(&d);
-            assert_eq!(cache.len(), 1);
-            assert_eq!(cache[0].name, "foo");
+        std::fs::create_dir_all(d.join("root/usr/share/foo")).unwrap();
+        std::fs::write(d.join("root/usr/share/foo/foo.conf"), "hello\n").unwrap();
+        std::os::unix::fs::symlink("../usr/share/foo/foo.conf", d.join("root/etc/foo.conf"))
+            .unwrap();
+        std::fs::write(d.join("root/etc/plain.conf"), "plain\n").unwrap();
+        let mut variants = vec![("", None)];
+        if have("zstd") {
+            variants.push((".zst", Some("--zstd")));
+        }
+        if have("xz") {
+            variants.push((".xz", Some("--xz")));
+        }
+        for (ext, flag) in variants {
+            let archive = d.join(format!("foo-1.0-1-any.pkg.tar{ext}"));
+            let mut c = std::process::Command::new("tar");
+            if let Some(f) = flag {
+                c.arg(f);
+            }
+            let ok = c
+                .arg("-cf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(d.join("root"))
+                .args(["etc/foo.conf", "etc/plain.conf", "usr/share/foo/foo.conf"])
+                .status()
+                .is_ok_and(|s| s.success());
+            if !ok {
+                continue;
+            }
+            assert_eq!(
+                read_member(&TarExtractor, &archive, "etc/plain.conf").unwrap(),
+                b"plain\n",
+                "{ext}"
+            );
+            assert_eq!(
+                TarExtractor.entry(&archive, "etc/foo.conf").unwrap(),
+                Entry::Symlink("../usr/share/foo/foo.conf".into()),
+                "{ext}"
+            );
+            assert_eq!(
+                read_member(&TarExtractor, &archive, "etc/foo.conf").unwrap(),
+                b"hello\n",
+                "{ext}"
+            );
+            assert!(TarExtractor.entry(&archive, "etc/missing").is_err());
+            assert_eq!(parse_cache_name(&archive).unwrap().name, "foo");
         }
         std::fs::remove_dir_all(&d).unwrap();
     }

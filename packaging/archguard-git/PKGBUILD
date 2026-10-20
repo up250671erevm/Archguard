@@ -14,7 +14,7 @@ conflicts=("$_pkgname")
 optdepends=('meld: graphical 3-way .pacnew merge'
             'kdiff3: alternative graphical 3-way .pacnew merge'
             'sudo: elevation for upgrades and /etc writes')
-options=('!lto')
+options=('!lto' '!debug')
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
 
