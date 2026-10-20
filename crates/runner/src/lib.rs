@@ -11,6 +11,7 @@
 use anyhow::{bail, Result};
 use archguard_core::check::Report;
 use archguard_core::config::{Elevation, Helper};
+use std::time::{Duration, Instant};
 
 /// A command to execute.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +99,19 @@ pub fn upgrade_command(
 pub trait CommandRunner {
     /// Run and return the exit code.
     fn run(&mut self, cmd: &CommandSpec) -> Result<i32>;
+
+    /// Run with a deadline. `Ok(None)` means it timed out and was killed.
+    /// The default ignores the timeout.
+    fn run_timeout(&mut self, cmd: &CommandSpec, timeout: Duration) -> Result<Option<i32>> {
+        let _ = timeout;
+        self.run(cmd).map(Some)
+    }
 }
+
+/// Poll interval while waiting for a command with a timeout.
+const POLL: Duration = Duration::from_millis(50);
+/// Grace period between SIGTERM and SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Runs commands for real, inheriting stdio.
 pub struct SystemRunner;
@@ -109,6 +122,37 @@ impl CommandRunner for SystemRunner {
             .args(&cmd.args)
             .status()?;
         Ok(st.code().unwrap_or(1))
+    }
+
+    fn run_timeout(&mut self, cmd: &CommandSpec, timeout: Duration) -> Result<Option<i32>> {
+        let mut child = std::process::Command::new(&cmd.program)
+            .args(&cmd.args)
+            .spawn()?;
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(st) = child.try_wait()? {
+                return Ok(Some(st.code().unwrap_or(1)));
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(POLL);
+        }
+        // Timed out: SIGTERM, then SIGKILL after a grace period.
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: plain kill(2) on our own child's pid.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+        let grace = Instant::now() + KILL_GRACE;
+        while Instant::now() < grace {
+            if child.try_wait()?.is_some() {
+                return Ok(None);
+            }
+            std::thread::sleep(POLL);
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Ok(None)
     }
 }
 
@@ -121,6 +165,10 @@ pub struct MockRunner {
     pub codes: std::collections::HashMap<String, i32>,
     /// Programs that fail to spawn (e.g. not installed).
     pub missing: Vec<String>,
+    /// Programs that hang (time out when run with a timeout).
+    pub hang: Vec<String>,
+    /// Timeouts passed to `run_timeout`, in call order.
+    pub timeouts: Vec<Duration>,
 }
 
 impl CommandRunner for MockRunner {
@@ -130,6 +178,15 @@ impl CommandRunner for MockRunner {
             bail!("{}: not found", cmd.program);
         }
         Ok(*self.codes.get(&cmd.program).unwrap_or(&self.exit_code))
+    }
+
+    fn run_timeout(&mut self, cmd: &CommandSpec, timeout: Duration) -> Result<Option<i32>> {
+        self.timeouts.push(timeout);
+        if self.hang.contains(&cmd.program) {
+            self.calls.push(cmd.clone());
+            return Ok(None);
+        }
+        self.run(cmd).map(Some)
     }
 }
 
@@ -158,10 +215,12 @@ pub fn parse_hook(line: &str) -> Result<CommandSpec> {
 pub enum UpgradeOutcome {
     /// Blocked by news; nothing was executed.
     Blocked,
-    /// A pre-upgrade hook failed (exit code, or `None` if it couldn't start).
+    /// A pre-upgrade hook failed: exit code, or `None` if it couldn't start
+    /// or (with `timed_out`) was killed after the timeout.
     HookFailed {
         hook: CommandSpec,
         code: Option<i32>,
+        timed_out: bool,
     },
     /// Upgrade ran with this exit code.
     Ran(i32),
@@ -172,6 +231,7 @@ pub enum UpgradeOutcome {
 pub fn guarded_upgrade(
     report: &Report,
     hooks: &[CommandSpec],
+    hook_timeout: Duration,
     cmd: &CommandSpec,
     runner: &mut dyn CommandRunner,
 ) -> Result<UpgradeOutcome> {
@@ -179,11 +239,16 @@ pub fn guarded_upgrade(
         return Ok(UpgradeOutcome::Blocked);
     }
     for h in hooks {
-        let code = runner.run(h).ok();
+        let (code, timed_out) = match runner.run_timeout(h, hook_timeout) {
+            Ok(Some(c)) => (Some(c), false),
+            Ok(None) => (None, true),
+            Err(_) => (None, false),
+        };
         if code != Some(0) {
             return Ok(UpgradeOutcome::HookFailed {
                 hook: h.clone(),
                 code,
+                timed_out,
             });
         }
     }
@@ -195,6 +260,8 @@ mod tests {
     use super::*;
     use archguard_core::check::Finding;
     use archguard_core::news::NewsItem;
+
+    const T: Duration = Duration::from_secs(300);
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
@@ -253,7 +320,7 @@ mod tests {
         let cmd = upgrade_command(Helper::Pacman, Elevation::Sudo, &[], false).unwrap();
         let mut r = MockRunner::default();
         assert_eq!(
-            guarded_upgrade(&report, &[], &cmd, &mut r).unwrap(),
+            guarded_upgrade(&report, &[], T, &cmd, &mut r).unwrap(),
             UpgradeOutcome::Blocked
         );
         assert!(r.calls.is_empty());
@@ -279,7 +346,7 @@ mod tests {
         let cmd = upgrade_command(Helper::Paru, Elevation::Sudo, &[], false).unwrap();
         let mut r = MockRunner::default();
         assert_eq!(
-            guarded_upgrade(&Report::default(), &hooks, &cmd, &mut r).unwrap(),
+            guarded_upgrade(&Report::default(), &hooks, T, &cmd, &mut r).unwrap(),
             UpgradeOutcome::Ran(0)
         );
         let progs: Vec<_> = r.calls.iter().map(|c| c.program.as_str()).collect();
@@ -295,12 +362,13 @@ mod tests {
         let cmd = upgrade_command(Helper::Pacman, Elevation::Sudo, &[], false).unwrap();
         let mut r = MockRunner::default();
         r.codes.insert("aurscan".into(), 3);
-        let o = guarded_upgrade(&Report::default(), &hooks, &cmd, &mut r).unwrap();
+        let o = guarded_upgrade(&Report::default(), &hooks, T, &cmd, &mut r).unwrap();
         assert_eq!(
             o,
             UpgradeOutcome::HookFailed {
                 hook: hooks[1].clone(),
-                code: Some(3)
+                code: Some(3),
+                timed_out: false
             }
         );
         assert!(!r.calls.iter().any(|c| c.is_sync()));
@@ -309,9 +377,72 @@ mod tests {
             missing: vec!["pkgwatch".into()],
             ..Default::default()
         };
-        let o = guarded_upgrade(&Report::default(), &hooks, &cmd, &mut r).unwrap();
+        let o = guarded_upgrade(&Report::default(), &hooks, T, &cmd, &mut r).unwrap();
         assert!(matches!(o, UpgradeOutcome::HookFailed { code: None, .. }));
         assert_eq!(r.calls.len(), 1);
+    }
+
+    #[test]
+    fn hanging_hook_times_out_and_blocks() {
+        let hooks = vec![parse_hook("pkgwatch").unwrap()];
+        let cmd = upgrade_command(Helper::Pacman, Elevation::Sudo, &[], false).unwrap();
+        let mut r = MockRunner {
+            hang: vec!["pkgwatch".into()],
+            ..Default::default()
+        };
+        let t = Duration::from_secs(7);
+        let o = guarded_upgrade(&Report::default(), &hooks, t, &cmd, &mut r).unwrap();
+        assert!(matches!(
+            o,
+            UpgradeOutcome::HookFailed {
+                timed_out: true,
+                code: None,
+                ..
+            }
+        ));
+        assert_eq!(r.timeouts, [t]);
+        assert!(!r.calls.iter().any(|c| c.is_sync()));
+    }
+
+    #[test]
+    fn system_runner_kills_on_timeout() {
+        let sleep = CommandSpec {
+            program: "sleep".into(),
+            args: vec!["30".into()],
+        };
+        let t0 = Instant::now();
+        let r = SystemRunner
+            .run_timeout(&sleep, Duration::from_millis(200))
+            .unwrap();
+        assert_eq!(r, None);
+        assert!(t0.elapsed() < Duration::from_secs(10));
+        let ok = CommandSpec {
+            program: "true".into(),
+            args: vec![],
+        };
+        assert_eq!(
+            SystemRunner
+                .run_timeout(&ok, Duration::from_secs(10))
+                .unwrap(),
+            Some(0)
+        );
+        let bad = CommandSpec {
+            program: "false".into(),
+            args: vec![],
+        };
+        assert_eq!(
+            SystemRunner
+                .run_timeout(&bad, Duration::from_secs(10))
+                .unwrap(),
+            Some(1)
+        );
+        let missing = CommandSpec {
+            program: "/nonexistent/hook".into(),
+            args: vec![],
+        };
+        assert!(SystemRunner
+            .run_timeout(&missing, Duration::from_secs(1))
+            .is_err());
     }
 
     #[test]
@@ -332,7 +463,7 @@ mod tests {
         let cmd = upgrade_command(Helper::Pacman, Elevation::Sudo, &[], false).unwrap();
         let mut r = MockRunner::default();
         assert_eq!(
-            guarded_upgrade(&report, &hooks, &cmd, &mut r).unwrap(),
+            guarded_upgrade(&report, &hooks, T, &cmd, &mut r).unwrap(),
             UpgradeOutcome::Blocked
         );
         assert!(r.calls.is_empty());
@@ -346,7 +477,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            guarded_upgrade(&Report::default(), &[], &cmd, &mut r).unwrap(),
+            guarded_upgrade(&Report::default(), &[], T, &cmd, &mut r).unwrap(),
             UpgradeOutcome::Ran(3)
         );
         assert_eq!(r.calls, vec![cmd]);

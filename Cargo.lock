@@ -115,6 +115,7 @@ dependencies = [
  "alpm",
  "anyhow",
  "feed-rs",
+ "libc",
  "quick-xml",
  "reqwest",
  "serde",

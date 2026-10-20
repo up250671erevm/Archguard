@@ -72,9 +72,14 @@ fn run() -> Result<i32> {
             cmd_check_notify(&ctx, Some((notifier.as_ref(), pacnew)), &mut out)
         }
         Command::Ack { ids, all } => {
-            let code = cmd_ack(&mut ctx, &ids, all, &mut out)?;
-            ctx.state.save(&state_path)?;
-            Ok(code)
+            // Locked read-modify-write so a concurrent tray ack isn't lost.
+            let (_, code) = State::update(&state_path, |st| {
+                ctx.state = std::mem::take(st);
+                let r = cmd_ack(&mut ctx, &ids, all, &mut out);
+                *st = std::mem::take(&mut ctx.state);
+                r
+            })?;
+            code
         }
         Command::Upgrade { extra } => cmd_upgrade(&ctx, &extra, &mut SystemRunner, &mut out),
         Command::Pacnew(_) => unreachable!("handled above"),

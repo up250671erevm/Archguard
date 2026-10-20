@@ -161,8 +161,10 @@ pub fn raw_has_guid(bytes: &[u8]) -> Option<Vec<bool>> {
     Some(out)
 }
 
-/// Deterministic id for items without a source GUID: SHA-256 of the link,
-/// or of title + published + summary when there is no link.
+/// Deterministic id for items without a source GUID: SHA-256 of
+/// link + title + published (so two items sharing a link don't share an
+/// ack), or of title + published + summary when there is no link.
+/// Editing the title of a GUID-less item re-blocks it (fail-closed).
 pub fn stable_id(link: Option<&str>, title: &str, published: Option<i64>, summary: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -170,6 +172,10 @@ pub fn stable_id(link: Option<&str>, title: &str, published: Option<i64>, summar
         Some(l) => {
             h.update(b"link\0");
             h.update(l.as_bytes());
+            h.update(b"\0");
+            h.update(title.trim().as_bytes());
+            h.update(b"\0");
+            h.update(published.unwrap_or(0).to_string().as_bytes());
         }
         None => {
             h.update(b"content\0");
@@ -305,8 +311,11 @@ mod tests {
         assert!(a[1..].iter().all(|i| i.id.starts_with("archguard:")));
         let uniq: std::collections::BTreeSet<_> = ids.iter().collect();
         assert_eq!(uniq.len(), 4);
-        // Link-based id ignores title edits; slug still usable for `ack`.
-        assert_eq!(a[1].id, stable_id(a[1].link.as_deref(), "other", None, ""));
+        // Slug still usable for `ack`.
+        assert_eq!(
+            a[1].id,
+            stable_id(a[1].link.as_deref(), &a[1].title, a[1].published, "ignored")
+        );
         assert_eq!(a[1].short_id(), "no-guid-with-link");
     }
 
@@ -328,6 +337,16 @@ mod tests {
         assert_ne!(a, stable_id(None, "t", Some(2), "s"));
         assert_ne!(a, stable_id(None, "t", Some(1), "x"));
         assert_ne!(stable_id(Some("l"), "", None, ""), a);
+        // Same link, different items => different ids (testerin #9).
+        assert_ne!(
+            stable_id(Some("https://x/n/"), "first", Some(1), ""),
+            stable_id(Some("https://x/n/"), "second", Some(2), "")
+        );
+        // Summary doesn't matter when there is a link.
+        assert_eq!(
+            stable_id(Some("l"), "t", Some(1), "a"),
+            stable_id(Some("l"), "t", Some(1), "b")
+        );
     }
 
     #[test]

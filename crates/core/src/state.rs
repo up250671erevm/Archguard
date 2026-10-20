@@ -52,6 +52,17 @@ impl State {
         }
     }
 
+    /// Locked read-modify-write: takes an exclusive `flock` on
+    /// `<path>.lock`, reloads the file, applies `f`, saves durably. Prevents
+    /// lost updates when the tray and the CLI ack at the same time.
+    pub fn update<R>(path: &Path, f: impl FnOnce(&mut State) -> R) -> Result<(State, R)> {
+        let _lock = crate::fsutil::lock_exclusive(&path.with_extension("lock"))?;
+        let mut st = Self::load(path)?;
+        let r = f(&mut st);
+        st.save(path)?;
+        Ok((st, r))
+    }
+
     /// Durably and atomically save: temp file, `fsync(file)`, rename over
     /// the target, `fsync(dir)`. Creates parent dirs.
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -86,6 +97,27 @@ mod tests {
         s.save(&path).unwrap();
         assert_eq!(State::load(&path).unwrap(), s);
         assert!(!path.with_extension("tmp").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_updates_are_not_lost() {
+        let dir = std::env::temp_dir().join(format!("ag-lock-{}", std::process::id()));
+        let path = dir.join("state");
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        State::update(&path, |s| s.ack(&format!("t{t}-{i}"))).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(State::load(&path).unwrap().acked.len(), 80);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

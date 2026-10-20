@@ -235,3 +235,65 @@ mod notify_and_hooks {
         assert!(runner.calls.is_empty());
     }
 }
+
+#[test]
+fn hanging_hook_times_out_and_blocks_upgrade() {
+    let n = news();
+    let pkgs = FakePackages::new(["glibc"]);
+    let mut c = ctx(&n, &pkgs, Helper::Pacman);
+    c.config.hooks.pre_upgrade = vec!["pkgwatch check".into()];
+    c.config.hooks.timeout_secs = 9;
+    let mut runner = MockRunner {
+        hang: vec!["pkgwatch".into()],
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    assert_eq!(
+        cmd_upgrade(&c, &[], &mut runner, &mut out).unwrap(),
+        EXIT_BLOCKED
+    );
+    assert_eq!(runner.timeouts, [std::time::Duration::from_secs(9)]);
+    assert!(!runner.calls.iter().any(|c| c.is_sync()));
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .contains("timed out after 9s"));
+}
+
+#[test]
+fn feed_failure_is_notified_and_errors() {
+    use archguard_core::news::{NewsItem, NewsSource};
+    use archguard_core::notify::{Notification, Notifier};
+    use std::cell::RefCell;
+    struct Down;
+    impl NewsSource for Down {
+        fn fetch(&self) -> anyhow::Result<Vec<NewsItem>> {
+            anyhow::bail!("fetching feed: connection refused")
+        }
+    }
+    struct Spy(RefCell<Vec<Notification>>);
+    impl Notifier for Spy {
+        fn send(&self, n: &Notification) -> anyhow::Result<()> {
+            self.0.borrow_mut().push(n.clone());
+            Ok(())
+        }
+    }
+    let pkgs = FakePackages::new(["glibc"]);
+    let c = Ctx {
+        config: Config::default(),
+        news: &Down,
+        packages: &pkgs,
+        state: State::default(),
+        now: 0,
+        is_root: false,
+    };
+    let spy = Spy(RefCell::new(vec![]));
+    assert!(archguard::cmd_check_notify(&c, Some((&spy, 0)), &mut Vec::new()).is_err());
+    let sent = spy.0.borrow();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].summary.contains("check failed"));
+    assert!(sent[0].body.contains("connection refused"));
+    // And upgrade refuses (error, no runner call).
+    let mut runner = MockRunner::default();
+    assert!(cmd_upgrade(&c, &[], &mut runner, &mut Vec::new()).is_err());
+    assert!(runner.calls.is_empty());
+}

@@ -5,8 +5,8 @@
 //! [`run`], which is ordinary blocking code.
 
 use crate::{
-    ack_ids, open_url_command, pick_terminal, run_check, terminal_command, transition_notification,
-    Action, Entry, Model,
+    ack_ids, open_url_command, pick_terminal, retry_delay, run_check, terminal_command,
+    transition_notification, Action, Entry, Model, RETRY_BUDGET,
 };
 use anyhow::{Context, Result};
 use archguard_core::config::Config;
@@ -133,8 +133,63 @@ fn now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Command-line options of `archguard-tray`.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// Retry reaching the session bus with backoff (see [`crate::RETRY_BUDGET`]).
+    pub retry: bool,
+}
+
+/// Start the SNI service. `assume_sni_available` keeps the tray alive when
+/// no StatusNotifierWatcher exists yet (e.g. at login before the panel):
+/// ksni registers as soon as one appears. Session-bus connection errors are
+/// retried with exponential backoff.
+fn spawn_with_retry(
+    tx: &Sender<Action>,
+    retry: bool,
+) -> Result<ksni::blocking::Handle<ArchguardTray>> {
+    let start = std::time::Instant::now();
+    let mut attempt = 0;
+    loop {
+        let tray = ArchguardTray {
+            model: Model::default(),
+            tx: tx.clone(),
+        };
+        match tray.assume_sni_available(true).spawn() {
+            Ok(h) => return Ok(h),
+            Err(e) => {
+                let delay = retry_delay(attempt);
+                if !retry || start.elapsed() + delay > RETRY_BUDGET {
+                    return Err(e).context(
+                        "starting tray (is a D-Bus session / StatusNotifierWatcher available?)",
+                    );
+                }
+                eprintln!("archguard-tray: {e}; retrying in {}s", delay.as_secs());
+                std::thread::sleep(delay);
+                attempt += 1;
+            }
+        }
+    }
+}
+
+/// Write or remove `~/.config/autostart/archguard-tray.desktop`.
+pub fn set_autostart(enable: bool) -> Result<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
+        .context("HOME unset")?;
+    let path = base.join("autostart/archguard-tray.desktop");
+    if enable {
+        archguard_core::fsutil::write_durable(&path, crate::AUTOSTART_DESKTOP.as_bytes())?;
+    } else if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
+    Ok(path)
+}
+
 /// Run the tray until "Quit".
-pub fn run() -> Result<()> {
+pub fn run(opts: Options) -> Result<()> {
     let env = ProcessEnv;
     let cfg = match config_file(&env) {
         Some(p) => Config::load(&p)?,
@@ -147,12 +202,7 @@ pub fn run() -> Result<()> {
     let packages = archguard_core::packages::system();
 
     let (tx, rx) = channel();
-    let handle = ArchguardTray {
-        model: Model::default(),
-        tx: tx.clone(),
-    }
-    .spawn()
-    .context("starting tray (is a StatusNotifierWatcher / D-Bus session available?)")?;
+    let handle = spawn_with_retry(&tx, opts.retry)?;
 
     let interval = match cfg.tray.interval_minutes {
         0 => None,
@@ -195,7 +245,14 @@ pub fn run() -> Result<()> {
                 }
                 let _ = tx.send(Action::CheckNow);
             }
-            Action::OpenUrl(u) => spawn_detached(&open_url_command(&u)),
+            Action::OpenUrl(u) => match open_url_command(&u) {
+                Some(c) => spawn_detached(&c),
+                None => notify(&Notification {
+                    summary: "archguard-tray".into(),
+                    body: format!("Refusing to open non-http(s) link: {u}"),
+                    critical: false,
+                }),
+            },
             Action::RunInTerminal(argv) => {
                 let env_t = std::env::var("TERMINAL").ok();
                 match pick_terminal(&cfg.tray.terminal, env_t.as_deref(), &in_path) {

@@ -178,7 +178,18 @@ pub fn cmd_check_notify(
     notify: Option<(&dyn Notifier, usize)>,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let r = ctx.report()?;
+    let r = match ctx.report() {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some((notifier, _)) = notify {
+                if let Err(ne) = notifier.send(&archguard_core::notify::failure(&format!("{e:#}")))
+                {
+                    writeln!(out, "archguard: warning: notification failed: {ne:#}")?;
+                }
+            }
+            return Err(e);
+        }
+    };
     print_report(&r, out)?;
     if let Some((notifier, pacnew)) = notify {
         if let Some(n) = compose(&r, pacnew) {
@@ -233,16 +244,26 @@ pub fn cmd_upgrade(
         .map(|h| parse_hook(h))
         .collect::<Result<Vec<_>>>()?;
     let r = ctx.report()?;
-    match guarded_upgrade(&r, &hooks, &cmd, runner)? {
+    let timeout = std::time::Duration::from_secs(ctx.config.hooks.timeout_secs);
+    match guarded_upgrade(&r, &hooks, timeout, &cmd, runner)? {
         UpgradeOutcome::Blocked => {
             print_report(&r, out)?;
             writeln!(out, "archguard: upgrade BLOCKED; `{cmd}` was not run.")?;
             Ok(EXIT_BLOCKED)
         }
-        UpgradeOutcome::HookFailed { hook, code } => {
-            let why = code.map_or("could not be started".to_string(), |c| {
-                format!("exited with {c}")
-            });
+        UpgradeOutcome::HookFailed {
+            hook,
+            code,
+            timed_out,
+        } => {
+            let why = match (code, timed_out) {
+                (_, true) => format!(
+                    "timed out after {}s and was killed",
+                    ctx.config.hooks.timeout_secs
+                ),
+                (Some(c), _) => format!("exited with {c}"),
+                (None, _) => "could not be started".to_string(),
+            };
             writeln!(
                 out,
                 "archguard: pre-upgrade hook `{hook}` {why}; upgrade BLOCKED, `{cmd}` was not run."
