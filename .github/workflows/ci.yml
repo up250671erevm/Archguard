@@ -140,7 +140,7 @@ jobs:
           echo "Cargo.toml=$cargo_ver PKGBUILD=$pkg_ver"
           test "$cargo_ver" = "$pkg_ver"
           grep -q "^## \[$cargo_ver\]" CHANGELOG.md
-          grep -q "^version = \"$cargo_ver\"" <(sed -n '/^name = "archguard"$/,/^$/p' Cargo.lock)
+          sed -n '/^name = "archguard"$/,/^$/p' Cargo.lock | grep -q "^version = \"$cargo_ver\""
       - name: Simulate tag tarball (git archive, same layout as GitHub)
         run: |
           ver=$(sed -n 's/^pkgver=//p' packaging/archguard/PKGBUILD)

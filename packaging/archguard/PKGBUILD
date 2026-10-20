@@ -1,0 +1,56 @@
+# Maintainer: EMIVICMAN <up250671erevm@users.noreply.github.com>
+#
+# Release package. Built from the GitHub tag tarball.
+# RELEASE STEP: the checksum below is a placeholder that intentionally fails
+# verification until the tag exists. After pushing tag v$pkgver run
+#   packaging/update-release-checksums.sh <version>
+# (or `updpkgsums` + `makepkg --printsrcinfo > .SRCINFO`). See RELEASE.md.
+pkgname=archguard
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Blocks Arch Linux upgrades when relevant Arch news needs attention"
+arch=('x86_64')
+url="https://github.com/up250671erevm/Archguard"
+license=('GPL-3.0-or-later')
+depends=('libgcc' 'glibc' 'libalpm.so=16-64')
+makedepends=('cargo')
+optdepends=('meld: graphical 3-way .pacnew merge'
+            'kdiff3: alternative graphical 3-way .pacnew merge'
+            'libnotify: notify-send fallback for notifications'
+            'xdg-utils: open news links from the tray'
+            'sudo: elevation for upgrades and /etc writes')
+conflicts=('archguard-git')
+options=('!lto' '!debug')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+_srcdir="Archguard-$pkgver"
+_features='archguard/alpm,archguard/notify,archguard-tray/alpm,archguard-tray/gui'
+
+prepare() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --workspace --features "$_features"
+}
+
+check() {
+  cd "$_srcdir"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --workspace --features "$_features"
+}
+
+package() {
+  cd "$_srcdir"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$pkgname" "target/release/$pkgname-tray"
+  install -Dm0644 -t "$pkgdir/usr/lib/systemd/user/" \
+    packaging/systemd/archguard-check.service packaging/systemd/archguard-check.timer
+  install -Dm0644 packaging/archguard-tray.desktop "$pkgdir/usr/share/applications/archguard-tray.desktop"
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md CHANGELOG.md
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
