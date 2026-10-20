@@ -29,10 +29,13 @@ cargo_ver="$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -1)"
 grep -qx $'\tpkgver = '"$ver" "$si" || fail ".SRCINFO pkgver differs"
 grep -qx $'\tsha256sums = '"$sum" "$si" || fail ".SRCINFO sha256sums differs from PKGBUILD"
 grep -q "^## \[$ver\]" "$root/CHANGELOG.md" || fail "CHANGELOG.md has no [$ver] section"
+grep -Eq "^## \[$ver\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" "$root/CHANGELOG.md" || fail "CHANGELOG.md [$ver] section has no release date (YYYY-MM-DD)"
 
 if [[ "$offline" != "--offline" ]]; then
   url="https://github.com/up250671erevm/Archguard/archive/refs/tags/v${ver}.tar.gz"
-  real="$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)"
+  tmp="$(mktemp)"; trap 'rm -f "$tmp"' EXIT
+  curl -fsSL --retry 3 -o "$tmp" "$url" || fail "tag tarball not found: $url (is tag v$ver pushed?)"
+  real="$(sha256sum "$tmp" | cut -d' ' -f1)"
   [[ "$real" == "$sum" ]] || fail "sha256 of $url is $real, PKGBUILD has $sum"
 fi
 echo "release $ver: ready to publish"
