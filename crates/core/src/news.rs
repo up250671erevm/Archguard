@@ -60,6 +60,29 @@ impl NewsItem {
     }
 }
 
+/// Turn `<code>`/`</code>` (any case) into backticks so matching can see code markup.
+pub fn code_to_backticks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('<') {
+        out.push_str(&rest[..i]);
+        let tag = &rest[i..];
+        let lower: String = tag.chars().take(7).collect::<String>().to_ascii_lowercase();
+        if lower.starts_with("<code>") {
+            out.push('`');
+            rest = &tag[6..];
+        } else if lower.starts_with("</code>") {
+            out.push('`');
+            rest = &tag[7..];
+        } else {
+            out.push('<');
+            rest = &tag[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Very small HTML tag stripper sufficient for matching purposes.
 pub fn strip_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -208,19 +231,21 @@ pub fn parse_feed(bytes: &[u8]) -> Result<Vec<NewsItem>> {
         .enumerate()
         .map(|(idx, e)| {
             let link = e.links.first().map(|l| l.href.clone());
-            let summary = strip_html(
-                &e.summary
-                    .map(|t| t.content)
-                    .or_else(|| e.content.and_then(|c| c.body))
-                    .unwrap_or_default(),
-            );
+            let raw = e
+                .summary
+                .map(|t| t.content)
+                .or_else(|| e.content.and_then(|c| c.body))
+                .unwrap_or_default();
+            // Ids keep using the plain text so existing acks stay valid.
+            let id_summary = strip_html(&raw);
+            let summary = strip_html(&code_to_backticks(&raw));
             let title = e.title.map(|t| t.content).unwrap_or_default();
             let published = e.published.or(e.updated).map(|d| d.timestamp());
             let source_guid = guids.as_ref().is_some_and(|g| g[idx]) && !e.id.trim().is_empty();
             let id = if source_guid {
                 e.id.trim().to_string()
             } else {
-                stable_id(link.as_deref(), &title, published, &summary)
+                stable_id(link.as_deref(), &title, published, &id_summary)
             };
             NewsItem {
                 id,
@@ -289,6 +314,14 @@ mod tests {
         assert!(items[0].summary.contains("rm /usr/lib/foolib.cache"));
         assert!(!items[0].summary.contains("<p>"));
         assert!(items[0].published.is_some());
+    }
+
+    #[test]
+    fn code_markup_becomes_backticks() {
+        let s = strip_html(&code_to_backticks(
+            "Use <code>which</code> or <CODE>less</CODE> <b>x</b>",
+        ));
+        assert!(s.contains("`which`") && s.contains("`less`") && !s.contains('<'));
     }
 
     #[test]

@@ -6,6 +6,34 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] - unreleased
+
+### Fixed
+- News matching false positives: common English words that are also package
+  names (e.g. `which`, `less`, `time`, `file`) no longer match unless strongly
+  signaled — inside `backticks`/`<code>`, or explicit package context ("the X
+  package", "package X", "X package(s)"). Reported: "Breaking changes for all
+  users of varnish, which is renamed to vinyl-cache" matched `which`.
+- "Arch Linux" (and "Arch Wiki", "archlinux.org", "Linux Foundation") is
+  treated as a phrase and no longer matches `linux`. Reported: "Arch Linux 2026
+  Leader Election Results" matched `linux`.
+- Word + version is a strong signal ("screen-4.2.0", "Go 1.24", "less >= 680"),
+  so real news such as "screen-4.2.0 cannot reattach older instances" keep
+  blocking.
+- Names are extracted without the full `-<version>-<pkgrel>` suffix
+  ("screen-4.4.0-1" -> `screen`; previously only `-1` was removed).
+
+### Changed
+- Behaviour change: a news item that mentions a common-word package only as a
+  bare word (e.g. "which") no longer blocks. Use `always_block = true` to block
+  on every unacknowledged item, or `weak_words`/`ignore` to tune.
+
+### Added
+- `[matching] weak_words` and `[matching] phrases` extend the built-in lists;
+  `ignore` and `always_block` behave as before.
+- `<code>` in news bodies is kept as backticks for matching (only with
+  `match_summary = true`); news ids are unchanged, so existing acks stay valid.
+
 ## [0.1.0] - 2026-10-20
 
 First public release.
@@ -45,4 +73,5 @@ First public release.
   `systemd-analyze --user verify`, and builds the release package in a clean chroot.
 
 [Unreleased]: https://github.com/up250671erevm/Archguard/compare/v0.1.0...HEAD
+[0.1.1]: https://github.com/up250671erevm/Archguard/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/up250671erevm/Archguard/releases/tag/v0.1.0

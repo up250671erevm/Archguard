@@ -160,6 +160,8 @@ jobs:
             cp -r . /tmp/filled
             sed -i "s/^sha256sums=.*/sha256sums=('$sum')/" /tmp/filled/packaging/archguard/PKGBUILD
             sed -i "s/^\tsha256sums = .*/\tsha256sums = $sum/" /tmp/filled/packaging/archguard/.SRCINFO
+            # An undated [x.y.z] section is fine pre-release; the guard requires a date at release.
+            sed -i "s/^## \[$ver\].*/## [$ver] - 2000-01-01/" /tmp/filled/CHANGELOG.md
             /tmp/filled/packaging/check-release-ready.sh "$ver" --offline
           else
             echo "real checksum: verifying against the GitHub tag tarball"
