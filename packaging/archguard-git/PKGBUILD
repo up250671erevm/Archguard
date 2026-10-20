@@ -7,7 +7,7 @@ pkgdesc="Blocks Arch Linux upgrades when relevant Arch news needs attention"
 arch=('x86_64')
 url="https://github.com/up250671erevm/Archguard"
 license=('GPL-3.0-or-later')
-depends=('gcc-libs' 'glibc')
+depends=('gcc-libs' 'glibc' 'libalpm.so')
 makedepends=('git' 'cargo')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
@@ -34,13 +34,13 @@ build() {
   cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --frozen --release --all-features
+  cargo build --frozen --release --features alpm
 }
 
 check() {
   cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
-  cargo test --frozen --all-features
+  cargo test --frozen --features alpm
 }
 
 package() {
