@@ -1,0 +1,50 @@
+# Maintainer: up250671erevm
+pkgname=archguard-git
+_pkgname=archguard
+pkgver=0.0.1.r0.g0000000
+pkgrel=1
+pkgdesc="Blocks Arch Linux upgrades when relevant Arch news needs attention"
+arch=('x86_64')
+url="https://github.com/up250671erevm/Archguard"
+license=('GPL-3.0-or-later')
+depends=('gcc-libs' 'glibc')
+makedepends=('git' 'cargo')
+provides=("$_pkgname")
+conflicts=("$_pkgname")
+options=('!lto')
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_pkgname"
+  if git describe --long --tags >/dev/null 2>&1; then
+    git describe --long --tags | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+  else
+    printf "0.0.1.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+  fi
+}
+
+prepare() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd "$_pkgname"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --frozen --all-features
+}
+
+package() {
+  cd "$_pkgname"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$_pkgname"
+  install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

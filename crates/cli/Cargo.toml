@@ -1,0 +1,18 @@
+[package]
+name = "archguard"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Blocks Arch Linux upgrades when relevant Arch news needs attention"
+
+[[bin]]
+name = "archguard"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+archguard-core = { path = "../core" }
+archguard-runner = { path = "../runner" }
+archguard-merge = { path = "../merge" }
