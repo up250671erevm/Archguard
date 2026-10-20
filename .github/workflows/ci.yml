@@ -162,6 +162,8 @@ jobs:
         run: cd /home/builder/rel && namcap archguard-*.pkg.tar.zst
       - name: Clean chroot build (devtools)
         run: |
+          # systemd-nspawn needs a machine id; docker images ship none.
+          test -s /etc/machine-id || systemd-machine-id-setup
           cd /home/builder/rel
           rm -f archguard-*.pkg.tar.zst
           sudo -u builder extra-x86_64-build -- -- --noconfirm
