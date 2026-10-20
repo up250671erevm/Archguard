@@ -48,6 +48,41 @@ pub fn write_durable_with(
     Ok(())
 }
 
+/// An exclusive advisory lock, released on drop.
+pub struct FileLock(File);
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: valid fd owned by self.0.
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+/// Block until an exclusive `flock(2)` on `path` is held (creates it).
+pub fn lock_exclusive(path: &Path) -> Result<FileLock> {
+    use std::os::fd::AsRawFd;
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).with_context(|| format!("creating {}", d.display()))?;
+    }
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("opening lock {}", path.display()))?;
+    loop {
+        // SAFETY: valid fd.
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(FileLock(f));
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e).with_context(|| format!("locking {}", path.display()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

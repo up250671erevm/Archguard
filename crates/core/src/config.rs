@@ -21,6 +21,7 @@
 //! # Commands run (as you, never elevated, no shell) after the news check and
 //! # before the upgrade. Any non-zero exit blocks the upgrade.
 //! pre_upgrade = ["pkgwatch check", "aurscan --pre-upgrade"]
+//! timeout_secs = 300     # per hook; on timeout the hook is killed and the upgrade blocked
 //!
 //! [tray]
 //! terminal = "auto"      # auto | konsole | gnome-terminal | kitty | alacritty | foot | xterm | ...
@@ -106,10 +107,22 @@ impl Default for Pacnew {
 }
 
 /// External hook commands.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Hooks {
     pub pre_upgrade: Vec<String>,
+    /// Per-hook timeout in seconds; a hook that exceeds it is killed and
+    /// blocks the upgrade. Must be > 0.
+    pub timeout_secs: u64,
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self {
+            pre_upgrade: Vec::new(),
+            timeout_secs: 300,
+        }
+    }
 }
 
 /// Tray applet options.
@@ -159,7 +172,11 @@ impl Default for Config {
 impl Config {
     /// Parse a config from TOML text.
     pub fn from_toml(s: &str) -> Result<Self> {
-        toml::from_str(s).context("invalid archguard config")
+        let c: Self = toml::from_str(s).context("invalid archguard config")?;
+        if c.hooks.timeout_secs == 0 {
+            anyhow::bail!("invalid archguard config: hooks.timeout_secs must be > 0");
+        }
+        Ok(c)
     }
 
     /// Load from `path`; a missing file yields the defaults.
@@ -212,6 +229,15 @@ mod tests {
         assert_eq!(c.pacnew.scan_dirs.len(), 2);
         assert_eq!(c.pacnew.cache_dir, "/var/cache/pacman/pkg");
         assert_eq!(c.hooks.pre_upgrade.len(), 2);
+        assert_eq!(c.hooks.timeout_secs, 300);
+        assert!(Config::from_toml("[hooks]\ntimeout_secs = 0").is_err());
+        assert_eq!(
+            Config::from_toml("[hooks]\ntimeout_secs = 5")
+                .unwrap()
+                .hooks
+                .timeout_secs,
+            5
+        );
         assert_eq!(c.tray.terminal, "kitty");
         assert_eq!(c.tray.interval_minutes, 360);
     }

@@ -1,7 +1,7 @@
-# Maintainer: up250671erevm
+# Maintainer: EMIVICMAN <up250671erevm@users.noreply.github.com>
 pkgname=archguard-git
 _pkgname=archguard
-pkgver=0.0.1.r0.g0000000
+pkgver=0.1.0.r0.g0000000
 pkgrel=1
 pkgdesc="Blocks Arch Linux upgrades when relevant Arch news needs attention"
 arch=('x86_64')
@@ -26,7 +26,7 @@ pkgver() {
   if git describe --long --tags >/dev/null 2>&1; then
     git describe --long --tags | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
   else
-    printf "0.0.1.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+    printf "0.1.0.r%s.g%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
   fi
 }
 
@@ -55,5 +55,6 @@ package() {
   install -Dm0644 -t "$pkgdir/usr/lib/systemd/user/" \
     packaging/systemd/archguard-check.service packaging/systemd/archguard-check.timer
   install -Dm0644 packaging/archguard-tray.desktop "$pkgdir/usr/share/applications/archguard-tray.desktop"
+  install -Dm0644 -t "$pkgdir/usr/share/doc/$pkgname/" README.md CHANGELOG.md
   install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

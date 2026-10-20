@@ -39,6 +39,16 @@ impl Notifier for NotifySend {
     }
 }
 
+/// Notification for a failed check (e.g. the feed could not be fetched).
+/// A failed check is not "all clear", so the user is told.
+pub fn failure(err: &str) -> Notification {
+    Notification {
+        summary: "archguard: news check failed".into(),
+        body: format!("{err}\nUpgrades are not verified until a check succeeds."),
+        critical: false,
+    }
+}
+
 /// Build the notification for a check result, or `None` if all is fine.
 pub fn compose(report: &Report, pacnew: usize) -> Option<Notification> {
     let n = report.findings.len();
@@ -88,6 +98,13 @@ mod tests {
             },
             packages: Default::default(),
         }
+    }
+
+    #[test]
+    fn failure_message() {
+        let n = failure("fetching https://archlinux.org/feeds/news/: timeout");
+        assert!(n.summary.contains("failed"));
+        assert!(n.body.contains("timeout"));
     }
 
     #[test]

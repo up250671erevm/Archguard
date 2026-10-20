@@ -4,7 +4,9 @@ use anyhow::{Context, Result};
 use archguard::pacnew::{
     cmd_diff, cmd_list, cmd_merge, in_path, resolve_tool, MergeOutcome, PacnewCtx,
 };
-use archguard::{cmd_ack, cmd_check, cmd_check_notify, cmd_upgrade, Cli, Command, Ctx, PacnewCmd};
+use archguard::{
+    cmd_ack_items, cmd_check, cmd_check_notify, cmd_upgrade, Cli, Command, Ctx, PacnewCmd,
+};
 use archguard_core::config::Config;
 use archguard_core::news::HttpNews;
 use archguard_core::notify::Notifier;
@@ -47,7 +49,7 @@ fn run() -> Result<i32> {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let mut ctx = Ctx {
+    let ctx = Ctx {
         config,
         news: &news,
         packages: packages.as_ref(),
@@ -72,9 +74,13 @@ fn run() -> Result<i32> {
             cmd_check_notify(&ctx, Some((notifier.as_ref(), pacnew)), &mut out)
         }
         Command::Ack { ids, all } => {
-            let code = cmd_ack(&mut ctx, &ids, all, &mut out)?;
-            ctx.state.save(&state_path)?;
-            Ok(code)
+            // Fetch first (network, unlocked), then a short locked
+            // read-modify-write so a concurrent tray ack isn't lost.
+            let items = ctx.news.fetch()?;
+            let (_, code) = State::update(&state_path, |st| {
+                cmd_ack_items(st, &items, &ids, all, &mut out)
+            })?;
+            code
         }
         Command::Upgrade { extra } => cmd_upgrade(&ctx, &extra, &mut SystemRunner, &mut out),
         Command::Pacnew(_) => unreachable!("handled above"),

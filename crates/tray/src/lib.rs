@@ -182,6 +182,11 @@ pub enum Action {
 /// Notification to show when going from `prev` to `next`: only for *new*
 /// blocking news ids or a growing pacnew count, so periodic checks don't spam.
 pub fn transition_notification(prev: &Model, next: &Model) -> Option<Notification> {
+    if let Status::Error(e) = &next.status {
+        // Notify once when checks start failing, not on every retry.
+        return (!matches!(prev.status, Status::Error(_)))
+            .then(|| archguard_core::notify::failure(e));
+    }
     let old: BTreeSet<_> = prev.findings.iter().map(|f| &f.id).collect();
     let new: Vec<_> = next
         .findings
@@ -268,13 +273,39 @@ pub fn terminal_command(terminal: &str, argv: &[String]) -> CommandSpec {
     }
 }
 
-/// Command to open a URL in the user's browser.
-pub fn open_url_command(url: &str) -> CommandSpec {
-    CommandSpec {
+/// True for absolute `http://` / `https://` URLs with a host and no
+/// whitespace or control characters (feed content is untrusted).
+pub fn is_web_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"));
+    let Some(rest) = rest else { return false };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty()
+        && !host.starts_with('-')
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
+}
+
+/// Command to open a URL in the user's browser; `None` unless [`is_web_url`].
+pub fn open_url_command(url: &str) -> Option<CommandSpec> {
+    is_web_url(url).then(|| CommandSpec {
         program: "xdg-open".into(),
         args: vec![url.into()],
-    }
+    })
 }
+
+/// Delay before the `attempt`-th (0-based) retry to reach the session bus:
+/// 1, 2, 4, … capped at 30 s.
+pub fn retry_delay(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(1u64 << attempt.min(5)).min(std::time::Duration::from_secs(30))
+}
+
+/// Total time the tray keeps retrying before giving up.
+pub const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Contents of the autostart entry written by `archguard-tray --autostart enable`.
+pub const AUTOSTART_DESKTOP: &str = include_str!("../../../packaging/archguard-tray.desktop");
 
 /// Run a full check (news + installed packages + acks + pacnew scan).
 /// Never syncs package databases.
@@ -298,9 +329,8 @@ pub fn run_check(
 
 /// Acknowledge `ids` in the state file at `path` (load, add, durable save).
 pub fn ack_ids(path: &std::path::Path, ids: &[String]) -> anyhow::Result<usize> {
-    let mut st = archguard_core::state::State::load(path)?;
-    let n = ids.iter().filter(|i| st.ack(i)).count();
-    st.save(path)?;
+    let (_, n) =
+        archguard_core::state::State::update(path, |st| ids.iter().filter(|i| st.ack(i)).count())?;
     Ok(n)
 }
 
@@ -467,6 +497,48 @@ mod tests {
         assert_eq!(k.args[0], "sh");
         let unknown = terminal_command("myterm", &argv);
         assert_eq!(unknown.args[0], "-e");
-        assert_eq!(open_url_command("https://x").args, ["https://x"]);
+        assert_eq!(open_url_command("https://x").unwrap().args, ["https://x"]);
+    }
+
+    #[test]
+    fn url_validation() {
+        for ok in [
+            "https://archlinux.org/news/x/",
+            "HTTP://example.com",
+            "https://a?b#c",
+        ] {
+            assert!(is_web_url(ok), "{ok}");
+        }
+        for bad in [
+            "file:///etc/shadow",
+            "javascript:alert(1)",
+            "--help",
+            "https://",
+            "https:///x",
+            "https://-evil",
+            "https://a b",
+            "https://a\n",
+            "ftp://x",
+            "",
+        ] {
+            assert!(!is_web_url(bad), "{bad:?}");
+            assert!(open_url_command(bad).is_none());
+        }
+    }
+
+    #[test]
+    fn backoff() {
+        let d: Vec<_> = (0..8).map(|i| retry_delay(i).as_secs()).collect();
+        assert_eq!(d, [1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn error_notifies_once() {
+        let ok = Model::from_check(&report(&[]), vec![]);
+        let err = ok.with_error("timeout");
+        let n = transition_notification(&ok, &err).unwrap();
+        assert!(n.summary.contains("check failed") && n.body.contains("timeout"));
+        assert!(transition_notification(&err, &err.with_error("again")).is_none());
+        assert!(transition_notification(&err, &ok).is_none());
     }
 }

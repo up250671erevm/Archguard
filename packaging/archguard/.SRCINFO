@@ -1,0 +1,23 @@
+pkgbase = archguard
+	pkgdesc = Blocks Arch Linux upgrades when relevant Arch news needs attention
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/up250671erevm/Archguard
+	arch = x86_64
+	license = GPL-3.0-or-later
+	makedepends = cargo
+	depends = libgcc
+	depends = glibc
+	depends = libalpm.so=16-64
+	optdepends = meld: graphical 3-way .pacnew merge
+	optdepends = kdiff3: alternative graphical 3-way .pacnew merge
+	optdepends = libnotify: notify-send fallback for notifications
+	optdepends = xdg-utils: open news links from the tray
+	optdepends = sudo: elevation for upgrades and /etc writes
+	conflicts = archguard-git
+	options = !lto
+	options = !debug
+	source = archguard-0.1.0.tar.gz::https://github.com/up250671erevm/Archguard/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+
+pkgname = archguard

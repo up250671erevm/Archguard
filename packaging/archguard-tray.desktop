@@ -1,9 +1,12 @@
 [Desktop Entry]
 Type=Application
 Name=archguard tray
+GenericName=Arch news upgrade guard
 Comment=Shows whether Arch news blocks your next upgrade
 Exec=archguard-tray
 Icon=security-high
-Categories=System;
+Terminal=false
+Categories=System;Monitor;
+Keywords=arch;pacman;news;upgrade;
 X-GNOME-Autostart-enabled=true
-NoDisplay=true
+X-KDE-autostart-after=panel

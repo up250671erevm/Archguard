@@ -178,7 +178,18 @@ pub fn cmd_check_notify(
     notify: Option<(&dyn Notifier, usize)>,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let r = ctx.report()?;
+    let r = match ctx.report() {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some((notifier, _)) = notify {
+                if let Err(ne) = notifier.send(&archguard_core::notify::failure(&format!("{e:#}")))
+                {
+                    writeln!(out, "archguard: warning: notification failed: {ne:#}")?;
+                }
+            }
+            return Err(e);
+        }
+    };
     print_report(&r, out)?;
     if let Some((notifier, pacnew)) = notify {
         if let Some(n) = compose(&r, pacnew) {
@@ -197,6 +208,18 @@ pub fn cmd_check_notify(
 /// `archguard ack`. Mutates `ctx.state`; caller persists it.
 pub fn cmd_ack(ctx: &mut Ctx, ids: &[String], all: bool, out: &mut dyn Write) -> Result<i32> {
     let items = ctx.news.fetch()?;
+    cmd_ack_items(&mut ctx.state, &items, ids, all, out)
+}
+
+/// Ack against already-fetched `items`. Lets callers fetch the feed
+/// *before* taking the state lock (no lock held during network I/O).
+pub fn cmd_ack_items(
+    state: &mut State,
+    items: &[archguard_core::news::NewsItem],
+    ids: &[String],
+    all: bool,
+    out: &mut dyn Write,
+) -> Result<i32> {
     let mut targets: Vec<String> = Vec::new();
     if all {
         targets.extend(items.iter().map(|i| i.id.clone()));
@@ -205,14 +228,14 @@ pub fn cmd_ack(ctx: &mut Ctx, ids: &[String], all: bool, out: &mut dyn Write) ->
             if arg.trim().is_empty() {
                 bail!("empty news id");
             }
-            let found = resolve_ids(&items, arg);
+            let found = resolve_ids(items, arg);
             if found.is_empty() {
                 bail!("no news item matches `{arg}`");
             }
             targets.extend(found.into_iter().map(str::to_string));
         }
     }
-    let n = targets.iter().filter(|t| ctx.state.ack(t)).count();
+    let n = targets.iter().filter(|t| state.ack(t)).count();
     writeln!(out, "archguard: acknowledged {n} news item(s).")?;
     Ok(EXIT_OK)
 }
@@ -233,16 +256,26 @@ pub fn cmd_upgrade(
         .map(|h| parse_hook(h))
         .collect::<Result<Vec<_>>>()?;
     let r = ctx.report()?;
-    match guarded_upgrade(&r, &hooks, &cmd, runner)? {
+    let timeout = std::time::Duration::from_secs(ctx.config.hooks.timeout_secs);
+    match guarded_upgrade(&r, &hooks, timeout, &cmd, runner)? {
         UpgradeOutcome::Blocked => {
             print_report(&r, out)?;
             writeln!(out, "archguard: upgrade BLOCKED; `{cmd}` was not run.")?;
             Ok(EXIT_BLOCKED)
         }
-        UpgradeOutcome::HookFailed { hook, code } => {
-            let why = code.map_or("could not be started".to_string(), |c| {
-                format!("exited with {c}")
-            });
+        UpgradeOutcome::HookFailed {
+            hook,
+            code,
+            timed_out,
+        } => {
+            let why = match (code, timed_out) {
+                (_, true) => format!(
+                    "timed out after {}s and was killed",
+                    ctx.config.hooks.timeout_secs
+                ),
+                (Some(c), _) => format!("exited with {c}"),
+                (None, _) => "could not be started".to_string(),
+            };
             writeln!(
                 out,
                 "archguard: pre-upgrade hook `{hook}` {why}; upgrade BLOCKED, `{cmd}` was not run."

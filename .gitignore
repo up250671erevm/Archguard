@@ -2,4 +2,5 @@
 /packaging/**/src
 /packaging/**/pkg
 /packaging/**/*.pkg.tar.*
-/packaging/**/archguard
+/packaging/archguard-git/archguard/
+/packaging/**/*.tar.gz

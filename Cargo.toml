@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/core", "crates/runner", "crates/merge", "crates/cli", "crates/tray"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/up250671erevm/Archguard"
