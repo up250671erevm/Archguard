@@ -11,6 +11,8 @@ description = "Blocks Arch Linux upgrades when relevant Arch news needs attentio
 default = []
 ## Read installed packages via libalpm instead of `pacman -Qq`.
 alpm = ["archguard-core/alpm"]
+## Desktop notifications via notify-rust (else falls back to `notify-send`).
+notify = ["dep:notify-rust"]
 
 [[bin]]
 name = "archguard"
@@ -23,3 +25,4 @@ archguard-core = { path = "../core" }
 archguard-runner = { path = "../runner" }
 archguard-merge = { path = "../merge" }
 libc = "0.2"
+notify-rust = { version = "4", optional = true, default-features = false, features = ["z", "async"] }

@@ -146,3 +146,92 @@ fn ack_of_guidless_items_persists_across_refetch() {
     assert_eq!(runner.calls.len(), 1);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+mod notify_and_hooks {
+    use super::*;
+    use archguard_core::notify::{Notification, Notifier};
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct Spy(RefCell<Vec<Notification>>, bool);
+    impl Notifier for Spy {
+        fn send(&self, n: &Notification) -> anyhow::Result<()> {
+            self.0.borrow_mut().push(n.clone());
+            if self.1 {
+                anyhow::bail!("no session bus");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn check_notify_sends_when_blocking_only() {
+        let n = news();
+        let pkgs = FakePackages::new(["foolib"]);
+        let c = ctx(&n, &pkgs, Helper::Pacman);
+        let spy = Spy::default();
+        assert_eq!(
+            archguard::cmd_check_notify(&c, Some((&spy, 0)), &mut Vec::new()).unwrap(),
+            EXIT_BLOCKED
+        );
+        assert_eq!(spy.0.borrow().len(), 1);
+        assert!(spy.0.borrow()[0].critical);
+
+        let clean = FakePackages::new(["glibc"]);
+        let c = ctx(&n, &clean, Helper::Pacman);
+        let spy = Spy::default();
+        archguard::cmd_check_notify(&c, Some((&spy, 0)), &mut Vec::new()).unwrap();
+        assert!(spy.0.borrow().is_empty());
+    }
+
+    #[test]
+    fn notification_failure_is_only_a_warning() {
+        let n = news();
+        let pkgs = FakePackages::new(["foolib"]);
+        let c = ctx(&n, &pkgs, Helper::Pacman);
+        let spy = Spy(RefCell::new(vec![]), true);
+        let mut out = Vec::new();
+        assert_eq!(
+            archguard::cmd_check_notify(&c, Some((&spy, 3)), &mut out).unwrap(),
+            EXIT_BLOCKED
+        );
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("warning: notification failed"));
+    }
+
+    #[test]
+    fn failing_pre_upgrade_hook_blocks_without_sync() {
+        let n = news();
+        let pkgs = FakePackages::new(["glibc"]);
+        let mut c = ctx(&n, &pkgs, Helper::Paru);
+        c.config.hooks.pre_upgrade = vec!["pkgwatch check".into(), "aurscan --pre-upgrade".into()];
+        let mut runner = MockRunner::default();
+        runner.codes.insert("aurscan".into(), 1);
+        let mut out = Vec::new();
+        assert_eq!(
+            cmd_upgrade(&c, &[], &mut runner, &mut out).unwrap(),
+            EXIT_BLOCKED
+        );
+        assert!(!runner.calls.iter().any(|c| c.is_sync()));
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("aurscan --pre-upgrade"));
+
+        let mut ok = MockRunner::default();
+        assert_eq!(cmd_upgrade(&c, &[], &mut ok, &mut Vec::new()).unwrap(), 0);
+        assert_eq!(ok.calls.len(), 3);
+        assert_eq!(ok.calls[2].to_string(), "paru -Syu");
+    }
+
+    #[test]
+    fn invalid_hook_config_errors_before_running_anything() {
+        let n = news();
+        let pkgs = FakePackages::new(["glibc"]);
+        let mut c = ctx(&n, &pkgs, Helper::Pacman);
+        c.config.hooks.pre_upgrade = vec!["".into()];
+        let mut runner = MockRunner::default();
+        assert!(cmd_upgrade(&c, &[], &mut runner, &mut Vec::new()).is_err());
+        assert!(runner.calls.is_empty());
+    }
+}

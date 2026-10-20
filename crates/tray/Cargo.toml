@@ -1,0 +1,28 @@
+[package]
+name = "archguard-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "System tray applet for archguard (StatusNotifierItem)"
+
+[features]
+default = []
+## Build the `archguard-tray` binary (ksni + notify-rust, needs a D-Bus session).
+gui = ["dep:ksni", "dep:notify-rust"]
+## Use libalpm for installed packages (as the main binary does on Arch).
+alpm = ["archguard-core/alpm"]
+
+[[bin]]
+name = "archguard-tray"
+path = "src/bin/archguard-tray.rs"
+required-features = ["gui"]
+
+[dependencies]
+anyhow = "1"
+archguard-core = { path = "../core" }
+archguard-runner = { path = "../runner" }
+# async-io everywhere avoids the zbus tokio/non-tokio executor mixup.
+ksni = { version = "0.3", optional = true, default-features = false, features = ["blocking", "async-io"] }
+notify-rust = { version = "4", optional = true, default-features = false, features = ["z", "async"] }

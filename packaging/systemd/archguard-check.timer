@@ -1,0 +1,12 @@
+[Unit]
+Description=archguard: daily Arch news check
+Documentation=https://github.com/up250671erevm/Archguard
+
+[Timer]
+OnBootSec=5min
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

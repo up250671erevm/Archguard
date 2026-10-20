@@ -117,12 +117,19 @@ impl CommandRunner for SystemRunner {
 pub struct MockRunner {
     pub calls: Vec<CommandSpec>,
     pub exit_code: i32,
+    /// Per-program exit codes overriding `exit_code`.
+    pub codes: std::collections::HashMap<String, i32>,
+    /// Programs that fail to spawn (e.g. not installed).
+    pub missing: Vec<String>,
 }
 
 impl CommandRunner for MockRunner {
     fn run(&mut self, cmd: &CommandSpec) -> Result<i32> {
         self.calls.push(cmd.clone());
-        Ok(self.exit_code)
+        if self.missing.contains(&cmd.program) {
+            bail!("{}: not found", cmd.program);
+        }
+        Ok(*self.codes.get(&cmd.program).unwrap_or(&self.exit_code))
     }
 }
 
@@ -132,23 +139,53 @@ pub fn running_as_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+/// Parse a hook command line (shell-like quoting, but no shell is used).
+pub fn parse_hook(line: &str) -> Result<CommandSpec> {
+    let mut words = shell_words::split(line)
+        .map_err(|e| anyhow::anyhow!("invalid hook `{line}`: {e}"))?
+        .into_iter();
+    let Some(program) = words.next() else {
+        bail!("empty hook command");
+    };
+    Ok(CommandSpec {
+        program,
+        args: words.collect(),
+    })
+}
+
 /// Outcome of [`guarded_upgrade`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum UpgradeOutcome {
     /// Blocked by news; nothing was executed.
     Blocked,
+    /// A pre-upgrade hook failed (exit code, or `None` if it couldn't start).
+    HookFailed {
+        hook: CommandSpec,
+        code: Option<i32>,
+    },
     /// Upgrade ran with this exit code.
     Ran(i32),
 }
 
-/// Refuse to upgrade if `report` is blocking; otherwise run `cmd`.
+/// Refuse to upgrade if `report` is blocking; then run every pre-upgrade
+/// hook (any failure blocks, fail-closed); finally run `cmd`.
 pub fn guarded_upgrade(
     report: &Report,
+    hooks: &[CommandSpec],
     cmd: &CommandSpec,
     runner: &mut dyn CommandRunner,
 ) -> Result<UpgradeOutcome> {
     if report.is_blocking() {
         return Ok(UpgradeOutcome::Blocked);
+    }
+    for h in hooks {
+        let code = runner.run(h).ok();
+        if code != Some(0) {
+            return Ok(UpgradeOutcome::HookFailed {
+                hook: h.clone(),
+                code,
+            });
+        }
     }
     Ok(UpgradeOutcome::Ran(runner.run(cmd)?))
 }
@@ -216,7 +253,86 @@ mod tests {
         let cmd = upgrade_command(Helper::Pacman, Elevation::Sudo, &[], false).unwrap();
         let mut r = MockRunner::default();
         assert_eq!(
-            guarded_upgrade(&report, &cmd, &mut r).unwrap(),
+            guarded_upgrade(&report, &[], &cmd, &mut r).unwrap(),
+            UpgradeOutcome::Blocked
+        );
+        assert!(r.calls.is_empty());
+    }
+
+    #[test]
+    fn hooks_parse() {
+        let h = parse_hook("aurscan --pre 'a b'").unwrap();
+        assert_eq!(h.program, "aurscan");
+        assert_eq!(h.args, s(&["--pre", "a b"]));
+        assert!(parse_hook("  ").is_err());
+        assert!(parse_hook("unterminated 'quote").is_err());
+        // No shell: metacharacters are plain arguments.
+        assert_eq!(parse_hook("x ; rm -rf /").unwrap().args[0], ";");
+    }
+
+    #[test]
+    fn hooks_run_in_order_then_upgrade() {
+        let hooks = vec![
+            parse_hook("pkgwatch check").unwrap(),
+            parse_hook("aurscan").unwrap(),
+        ];
+        let cmd = upgrade_command(Helper::Paru, Elevation::Sudo, &[], false).unwrap();
+        let mut r = MockRunner::default();
+        assert_eq!(
+            guarded_upgrade(&Report::default(), &hooks, &cmd, &mut r).unwrap(),
+            UpgradeOutcome::Ran(0)
+        );
+        let progs: Vec<_> = r.calls.iter().map(|c| c.program.as_str()).collect();
+        assert_eq!(progs, ["pkgwatch", "aurscan", "paru"]);
+    }
+
+    #[test]
+    fn failing_or_missing_hook_blocks_without_sync() {
+        let hooks = vec![
+            parse_hook("pkgwatch check").unwrap(),
+            parse_hook("aurscan").unwrap(),
+        ];
+        let cmd = upgrade_command(Helper::Pacman, Elevation::Sudo, &[], false).unwrap();
+        let mut r = MockRunner::default();
+        r.codes.insert("aurscan".into(), 3);
+        let o = guarded_upgrade(&Report::default(), &hooks, &cmd, &mut r).unwrap();
+        assert_eq!(
+            o,
+            UpgradeOutcome::HookFailed {
+                hook: hooks[1].clone(),
+                code: Some(3)
+            }
+        );
+        assert!(!r.calls.iter().any(|c| c.is_sync()));
+
+        let mut r = MockRunner {
+            missing: vec!["pkgwatch".into()],
+            ..Default::default()
+        };
+        let o = guarded_upgrade(&Report::default(), &hooks, &cmd, &mut r).unwrap();
+        assert!(matches!(o, UpgradeOutcome::HookFailed { code: None, .. }));
+        assert_eq!(r.calls.len(), 1);
+    }
+
+    #[test]
+    fn hooks_not_run_when_news_blocks() {
+        let report = Report {
+            findings: vec![Finding {
+                item: NewsItem {
+                    id: "x".into(),
+                    title: "t".into(),
+                    summary: String::new(),
+                    link: None,
+                    published: None,
+                },
+                packages: Default::default(),
+            }],
+        };
+        let hooks = vec![parse_hook("pkgwatch").unwrap()];
+        let cmd = upgrade_command(Helper::Pacman, Elevation::Sudo, &[], false).unwrap();
+        let mut r = MockRunner::default();
+        assert_eq!(
+            guarded_upgrade(&report, &hooks, &cmd, &mut r).unwrap(),
             UpgradeOutcome::Blocked
         );
         assert!(r.calls.is_empty());
@@ -230,7 +346,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            guarded_upgrade(&Report::default(), &cmd, &mut r).unwrap(),
+            guarded_upgrade(&Report::default(), &[], &cmd, &mut r).unwrap(),
             UpgradeOutcome::Ran(3)
         );
         assert_eq!(r.calls, vec![cmd]);

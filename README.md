@@ -4,7 +4,7 @@
 >
 > **EN:** Rust CLI for Arch Linux / EndeavourOS that reads the Arch news RSS feed, matches items against installed packages and **blocks the upgrade before `-Sy`** when relevant unread news exists. It is a wrapper, not a pacman hook. Later it will help merge `.pacnew` files.
 
-**Status:** Phase 2 — `check`, `ack`, `upgrade`, `pacnew` implemented.
+**Status:** Phase 3 — `check [--notify]`, `ack`, `upgrade` (+ hooks), `pacnew`, tray applet, systemd user timer.
 
 ## Workspace
 
@@ -14,6 +14,7 @@
 | `crates/runner` | Runs pacman/paru/yay; elevates only what is needed via sudo/run0 — never everything as root |
 | `crates/merge` | 3-way `.pacnew` merge with `similar`, base from old pkg in `/var/cache/pacman/pkg`, meld/kdiff3 on conflict |
 | `crates/cli` | `archguard` binary (clap) |
+| `crates/tray` | `archguard-tray` (feature `gui`: ksni + notify-rust); logic is D-Bus-free and unit-tested |
 
 > The `alpm` crate (pinned `~5.0`, libalpm 16 / pacman 7.1) is behind the cargo feature `alpm` so non-Arch builds work; without it archguard falls back to `pacman -Qq`. Both only read the **local** DB — archguard never syncs it during `check`.
 
@@ -35,6 +36,27 @@ archguard pacnew merge /etc/pacman.conf [--yes]
 
 `merge` does a 3-way merge (base = file from the previous package version in `/var/cache/pacman/pkg`, ours = live file, theirs = `.pacnew`). A clean merge shows the diff and, after confirmation, writes the result (backup `*.archguard-bak.<time>`) and removes the `.pacnew`. On conflicts, or when no base is cached, meld or kdiff3 is launched; without them conflict markers are left in a private temp file. Only the final cp/install/mv/rm steps are elevated (sudo/run0).
 
+### Tray, notifications and timer
+
+```sh
+archguard check --notify                      # desktop notification if something needs attention
+systemctl --user enable --now archguard-check.timer   # daily + 5 min after boot, Persistent=true
+archguard-tray &                              # StatusNotifierItem (KDE, GNOME + AppIndicator, ...)
+```
+
+The tray shows OK / blocking news / pending .pacnew, and offers *Check now*, *Open Arch news*, per-item *Read*/*Acknowledge*, *Acknowledge all shown*, and *Run upgrade in terminal* (`archguard upgrade`, so the same guard applies). To autostart it: `cp /usr/share/applications/archguard-tray.desktop ~/.config/autostart/`.
+
+Notifications use notify-rust when built with feature `archguard/notify` (the PKGBUILD does), else `notify-send`. A failed notification never changes the exit code. The service treats exit 1 ("blocking news") as success.
+
+### Pre-upgrade hooks (pkgwatch / aurscan / anything)
+
+```toml
+[hooks]
+pre_upgrade = ["pkgwatch check", "aurscan --pre-upgrade"]
+```
+
+Run in order, as your user (never elevated), without a shell (quoting like `sh`, but `;`, `|`, `$()` are literal), only after the news check passed and before `-Syu`. Any non-zero exit — or a hook that can't be started — blocks the upgrade (fail-closed).
+
 `upgrade` refuses to run `-Syu` while `check` is blocking. Only `pacman` is elevated (sudo/run0); paru/yay are never run as root.
 
 Config `~/.config/archguard.toml` (all optional):
@@ -53,6 +75,11 @@ max_age_days = 0
 merge_tool = "auto"    # auto | meld | kdiff3 | none
 scan_dirs = ["/etc"]
 cache_dir = "/var/cache/pacman/pkg"
+[hooks]
+pre_upgrade = []
+[tray]
+terminal = "auto"      # or konsole, gnome-terminal, kitty, alacritty, foot, xterm, ...
+interval_minutes = 360
 ```
 
 State (acked ids): `~/.local/state/archguard/state`.
@@ -61,7 +88,8 @@ State (acked ids): `~/.local/state/archguard/state`.
 
 ```sh
 # From source
-cargo install --path crates/cli --locked --features alpm
+cargo install --path crates/cli --locked --features alpm,notify
+cargo install --path crates/tray --locked --features gui,alpm
 
 # Arch (VCS package)
 cd packaging/archguard-git && makepkg -si
