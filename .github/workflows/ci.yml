@@ -164,6 +164,13 @@ jobs:
         run: |
           # systemd-nspawn needs a machine id; docker images ship none.
           test -s /etc/machine-id || systemd-machine-id-setup
+          # ...and registers the container with systemd-machined over the
+          # system bus. Docker has neither, so start both by hand.
+          mkdir -p /run/dbus
+          dbus-daemon --system --fork
+          /usr/lib/systemd/systemd-machined &
+          for i in $(seq 1 20); do busctl status org.freedesktop.machine1 >/dev/null 2>&1 && break; sleep 0.5; done
+          busctl status org.freedesktop.machine1 | head -3 || true
           cd /home/builder/rel
           rm -f archguard-*.pkg.tar.zst
           sudo -u builder extra-x86_64-build -- -- --noconfirm
