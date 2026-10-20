@@ -16,6 +16,15 @@
 //! merge_tool = "auto"    # auto | meld | kdiff3 | none
 //! scan_dirs = ["/etc"]
 //! cache_dir = "/var/cache/pacman/pkg"
+//!
+//! [hooks]
+//! # Commands run (as you, never elevated, no shell) after the news check and
+//! # before the upgrade. Any non-zero exit blocks the upgrade.
+//! pre_upgrade = ["pkgwatch check", "aurscan --pre-upgrade"]
+//!
+//! [tray]
+//! terminal = "auto"      # auto | konsole | gnome-terminal | kitty | alacritty | foot | xterm | ...
+//! interval_minutes = 360 # periodic re-check (0 = only on demand)
 //! ```
 
 use anyhow::{Context, Result};
@@ -96,6 +105,30 @@ impl Default for Pacnew {
     }
 }
 
+/// External hook commands.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct Hooks {
+    pub pre_upgrade: Vec<String>,
+}
+
+/// Tray applet options.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tray {
+    pub terminal: String,
+    pub interval_minutes: u32,
+}
+
+impl Default for Tray {
+    fn default() -> Self {
+        Self {
+            terminal: "auto".into(),
+            interval_minutes: 360,
+        }
+    }
+}
+
 /// Full configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -105,6 +138,8 @@ pub struct Config {
     pub feed_url: String,
     pub matching: Matching,
     pub pacnew: Pacnew,
+    pub hooks: Hooks,
+    pub tray: Tray,
 }
 
 impl Default for Config {
@@ -115,6 +150,8 @@ impl Default for Config {
             feed_url: crate::NEWS_FEED_URL.to_string(),
             matching: Matching::default(),
             pacnew: Pacnew::default(),
+            hooks: Hooks::default(),
+            tray: Tray::default(),
         }
     }
 }
@@ -158,6 +195,10 @@ mod tests {
             [pacnew]
             merge_tool = "kdiff3"
             scan_dirs = ["/etc", "/usr/share/x"]
+            [hooks]
+            pre_upgrade = ["pkgwatch check", "aurscan --pre-upgrade"]
+            [tray]
+            terminal = "kitty"
             "#,
         )
         .unwrap();
@@ -170,6 +211,9 @@ mod tests {
         assert_eq!(c.pacnew.merge_tool, MergeTool::Kdiff3);
         assert_eq!(c.pacnew.scan_dirs.len(), 2);
         assert_eq!(c.pacnew.cache_dir, "/var/cache/pacman/pkg");
+        assert_eq!(c.hooks.pre_upgrade.len(), 2);
+        assert_eq!(c.tray.terminal, "kitty");
+        assert_eq!(c.tray.interval_minutes, 360);
     }
 
     #[test]

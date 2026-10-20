@@ -232,6 +232,16 @@ pub fn install(
         std::fs::copy(target, &backup)?;
         std::fs::write(&staged, content)?;
         std::fs::set_permissions(&staged, meta.permissions())?;
+        // Best effort: carry xattrs/ACLs to the backup and the new file.
+        for dst in [&backup, &staged] {
+            let c = attr_copy(target, dst, false);
+            if ctx.runner.run(&c).map_or(true, |code| code != 0) {
+                eprintln!(
+                    "archguard: warning: could not copy xattrs/ACLs to {}",
+                    dst.display()
+                );
+            }
+        }
         std::fs::File::open(&staged)?.sync_all()?;
         std::fs::rename(&staged, target)?;
         std::fs::remove_file(pacnew)?;
@@ -269,7 +279,9 @@ pub fn install(
             "cp",
             vec![
                 "--attributes-only".into(),
-                "--preserve=all".into(),
+                // No timestamps: the new file must not look old (testerdin).
+                // `mode` includes POSIX ACLs.
+                "--preserve=mode,ownership,xattr".into(),
                 "--".into(),
                 s(target),
                 s(&staged),
@@ -287,6 +299,25 @@ pub fn install(
     }
     let _ = std::fs::remove_file(&tmp);
     Ok(backup)
+}
+
+/// `cp --attributes-only` command copying ACLs/xattrs (and owner if root).
+fn attr_copy(src: &Path, dst: &Path, ownership: bool) -> CommandSpec {
+    let preserve = if ownership {
+        "--preserve=mode,ownership,xattr"
+    } else {
+        "--preserve=mode,xattr"
+    };
+    CommandSpec {
+        program: "cp".into(),
+        args: vec![
+            "--attributes-only".into(),
+            preserve.into(),
+            "--".into(),
+            src.display().to_string(),
+            dst.display().to_string(),
+        ],
+    }
 }
 
 /// Outcome of `pacnew merge`.
@@ -325,6 +356,18 @@ pub fn cmd_merge(
             link.display(),
             target.display()
         )?;
+        let inside = ctx
+            .scan_dirs
+            .iter()
+            .any(|d| std::fs::canonicalize(d).is_ok_and(|d| target.starts_with(d)));
+        if !inside {
+            writeln!(
+                out,
+                "warning: real target {} is outside the configured scan_dirs; double-check \
+                 this is the file you mean to change.",
+                target.display()
+            )?;
+        }
     }
     let ours = read(&target)?;
     let theirs = read(&pacnew)?;
@@ -401,6 +444,16 @@ pub fn cmd_merge(
                     // Closing the tool without saving leaves the prefilled
                     // current file; meld's middle pane starts from base.
                     let unchanged = r == ours || base.as_ref().is_ok_and(|(b, _)| *b == r);
+                    if code == 0 && r == ours {
+                        writeln!(
+                            out,
+                            "You kept your current version of {tdisp}; nothing written. The \
+                             .pacnew was kept — remove it yourself if you really want to \
+                             discard the new defaults: {}",
+                            pacnew.display()
+                        )?;
+                        return Ok(MergeOutcome::Declined);
+                    }
                     if code != 0 || r.is_empty() || has_markers(&r) || unchanged {
                         writeln!(
                             out,
@@ -439,6 +492,13 @@ pub fn cmd_merge(
         }
     };
 
+    if result == ours {
+        writeln!(
+            out,
+            "The merge result equals your current {tdisp} (the new defaults add nothing); \
+             only the .pacnew will be removed."
+        )?;
+    }
     write!(
         out,
         "{}",
@@ -580,7 +640,14 @@ mod tests {
         );
         assert!(!fx.dir.join("etc/foo.conf.pacnew").exists());
         assert!(text.contains("from foo 1.0-1"));
-        assert!(r.calls.is_empty());
+        // Unelevated, best-effort xattr/ACL copies for backup and new file.
+        assert_eq!(r.calls.len(), 2);
+        assert!(r.calls.iter().all(|c| c.program == "cp"
+            && c.args[..2]
+                == [
+                    "--attributes-only".to_string(),
+                    "--preserve=mode,xattr".to_string()
+                ]));
         std::fs::remove_dir_all(&fx.dir).unwrap();
     }
 
@@ -607,6 +674,14 @@ mod tests {
         let progs: Vec<_> = r.calls.iter().map(|c| c.args[0].as_str()).collect();
         assert_eq!(progs, ["cp", "install", "cp", "mv", "rm"]);
         assert!(r.calls[2].args.contains(&"--attributes-only".to_string()));
+        assert!(r.calls[2]
+            .args
+            .contains(&"--preserve=mode,ownership,xattr".to_string()));
+        assert!(!r
+            .calls
+            .iter()
+            .flat_map(|c| &c.args)
+            .any(|a| a.contains("=all")));
         assert!(r.calls.iter().all(|c| c.program == "sudo"));
         // Staged merged content was prepared by the user, not as root.
         let install = &r.calls[1];
@@ -667,6 +742,7 @@ mod tests {
             };
             let (o, text) = run_merge_yes(&fx, Some(Tool::Kdiff3), true, true, yes, &mut r);
             assert_eq!(o, MergeOutcome::Declined, "{text}");
+            assert!(text.contains("You kept your current version"), "{text}");
             assert_eq!(r.calls[0].program, "kdiff3");
             assert!(r.calls[0].args[0].ends_with("foo.conf.base"));
             assert!(fx.dir.join("etc/foo.conf.pacnew").exists());
@@ -738,6 +814,7 @@ mod tests {
         let (o, text) = run_merge(&fx, None, true, true, &mut r);
         assert!(matches!(o, MergeOutcome::Installed { .. }), "{text}");
         assert!(text.contains("is a symlink"));
+        assert!(text.contains("outside the configured scan_dirs"));
         assert!(std::fs::symlink_metadata(&fx.target)
             .unwrap()
             .file_type()

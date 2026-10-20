@@ -1,0 +1,15 @@
+[Unit]
+Description=archguard: check Arch news against installed packages
+Documentation=https://github.com/up250671erevm/Archguard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/archguard check --notify
+# Exit 1 = "blocking news found" (a notification was sent), not a failure.
+SuccessExitStatus=1
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+StateDirectory=archguard

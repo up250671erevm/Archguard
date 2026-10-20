@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Arch Linux: Recent news updates</title>
+    <link>https://archlinux.org/news/</link>
+    <description>fixture</description>
+    <item>
+      <title>Has guid</title>
+      <link>https://archlinux.org/news/has-guid/</link>
+      <guid isPermaLink="false">tag:archlinux.org,2026:/news/has-guid/</guid>
+    </item>
+    <item>
+      <title>foolib without guid</title>
+      <link>https://archlinux.org/news/no-guid-with-link/</link>
+      <pubDate>Mon, 12 Oct 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <title>Empty guid</title>
+      <guid>   </guid>
+      <pubDate>Tue, 13 Oct 2026 10:00:00 +0000</pubDate>
+    </item>
+    <item>
+      <description>&lt;p&gt;Untitled, no link, no guid.&lt;/p&gt;</description>
+    </item>
+  </channel>
+</rss>

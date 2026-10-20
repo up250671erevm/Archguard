@@ -21,6 +21,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: clippy (desktop features)
+        run: cargo clippy --workspace --all-targets --locked --features archguard/notify,archguard-tray/gui -- -D warnings
       - name: test
         run: cargo test --workspace --locked
 
@@ -33,9 +35,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: build + test
         run: cargo test --workspace --locked
+      - name: build optional desktop features
+        run: cargo build --workspace --locked --features archguard/notify,archguard-tray/gui
 
   archlinux:
-    name: archlinux (alpm feature)
+    name: archlinux (all features)
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
@@ -49,15 +53,18 @@ jobs:
           grep -A1 '^name = "alpm"$' Cargo.lock
           cargo test --locked -p archguard-core --features alpm -- packages::tests::libalpm_version_is_supported --exact
       - name: clippy (alpm)
-        run: cargo clippy --workspace --all-targets --locked --features archguard/alpm -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked --features archguard/alpm,archguard/notify,archguard-tray/alpm,archguard-tray/gui -- -D warnings
       - name: test (alpm)
-        run: cargo test --workspace --locked --features archguard/alpm
+        run: cargo test --workspace --locked --features archguard/alpm,archguard/notify,archguard-tray/alpm,archguard-tray/gui
       - name: build release (alpm)
-        run: cargo build --workspace --locked --release --features archguard/alpm
+        run: cargo build --workspace --locked --release --features archguard/alpm,archguard/notify,archguard-tray/alpm,archguard-tray/gui
       - name: smoke
         run: |
           ./target/release/archguard --version
           ./target/release/archguard --help
+          ./target/release/archguard-tray --version
+          # No session bus in CI: must fail cleanly, not panic.
+          ./target/release/archguard-tray && exit 1 || test $? -eq 2
 
   makepkg:
     name: makepkg + namcap (archguard-git)
@@ -65,7 +72,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install deps
-        run: pacman -Syu --noconfirm --needed base-devel git rust namcap sudo
+        run: pacman -Syu --noconfirm --needed base-devel git rust namcap sudo systemd
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -92,4 +99,8 @@ jobs:
         run: |
           pacman -U --noconfirm /home/builder/pkg/*.pkg.tar.*
           archguard --version
+          archguard-tray --version
           test -f /usr/share/licenses/archguard-git/LICENSE
+          test -f /usr/share/applications/archguard-tray.desktop
+          systemd-analyze verify --user /usr/lib/systemd/user/archguard-check.service /usr/lib/systemd/user/archguard-check.timer || \
+            systemd-analyze verify /usr/lib/systemd/user/archguard-check.service /usr/lib/systemd/user/archguard-check.timer

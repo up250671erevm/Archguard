@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=archguard tray
+Comment=Shows whether Arch news blocks your next upgrade
+Exec=archguard-tray
+Icon=security-high
+Categories=System;
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

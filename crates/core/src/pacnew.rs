@@ -295,11 +295,19 @@ pub fn parse_listing(line: &str, member: &str) -> Option<Entry> {
         line.find(&needle)
             .map(|i| line[i + needle.len()..].trim_end().to_string())
     };
+    // The name must appear as its own whitespace-separated field.
+    let ends_with_name = |rest: &str| {
+        rest.strip_suffix(member)
+            .is_some_and(|p| p.ends_with(char::is_whitespace))
+    };
+    let line = line.trim_end();
     Some(match kind {
-        '-' => Entry::File(Vec::new()),
+        '-' if ends_with_name(line) => Entry::File(Vec::new()),
         'l' => Entry::Symlink(after_name(" -> ")?),
         'h' => Entry::Hardlink(after_name(" link to ")?),
-        _ => Entry::Other,
+        '-' => return None,
+        _ if ends_with_name(line.trim_end_matches('/')) => Entry::Other,
+        _ => return None,
     })
 }
 
@@ -669,8 +677,16 @@ mod tests {
             parse_listing("-rw-r--r--  0 root root 5 Jan  1  2026 etc/foo.conf", m),
             Some(Entry::File(vec![]))
         );
+        // Name must match exactly (testerdin nit).
+        for bad in [
+            "-rw-r--r-- 0 root root 5 Jan 1 2026 etc/foo.conf.bak",
+            "-rw-r--r-- 0 root root 5 Jan 1 2026 xetc/foo.conf",
+            "drwxr-xr-x 0 root root 0 Jan 1 2026 etc/",
+        ] {
+            assert_eq!(parse_listing(bad, m), None, "{bad}");
+        }
         assert_eq!(
-            parse_listing("drwxr-xr-x 0 root root 0 Jan 1 2026 etc/", m),
+            parse_listing("drwxr-xr-x 0 root root 0 Jan 1 2026 etc/foo.conf/", m),
             Some(Entry::Other)
         );
         assert!(has_glob("etc/*.conf") && has_glob("etc/a[1]") && !has_glob("etc/a.conf"));

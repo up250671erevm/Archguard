@@ -4,9 +4,10 @@ use anyhow::{Context, Result};
 use archguard::pacnew::{
     cmd_diff, cmd_list, cmd_merge, in_path, resolve_tool, MergeOutcome, PacnewCtx,
 };
-use archguard::{cmd_ack, cmd_check, cmd_upgrade, Cli, Command, Ctx, PacnewCmd};
+use archguard::{cmd_ack, cmd_check, cmd_check_notify, cmd_upgrade, Cli, Command, Ctx, PacnewCmd};
 use archguard_core::config::Config;
 use archguard_core::news::HttpNews;
+use archguard_core::notify::Notifier;
 use archguard_core::pacnew::{list_cache, PacmanOwner, TarExtractor};
 use archguard_core::paths::{config_file, state_file, ProcessEnv};
 use archguard_core::state::State;
@@ -56,7 +57,20 @@ fn run() -> Result<i32> {
     };
     let mut out = std::io::stdout();
     match command {
-        Command::Check => cmd_check(&ctx, &mut out),
+        Command::Check { notify: false } => cmd_check(&ctx, &mut out),
+        Command::Check { notify: true } => {
+            let pacnew = archguard_core::pacnew::scan(
+                &ctx.config
+                    .pacnew
+                    .scan_dirs
+                    .iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>(),
+            )
+            .len();
+            let notifier = notifier();
+            cmd_check_notify(&ctx, Some((notifier.as_ref(), pacnew)), &mut out)
+        }
         Command::Ack { ids, all } => {
             let code = cmd_ack(&mut ctx, &ids, all, &mut out)?;
             ctx.state.save(&state_path)?;
@@ -64,6 +78,18 @@ fn run() -> Result<i32> {
         }
         Command::Upgrade { extra } => cmd_upgrade(&ctx, &extra, &mut SystemRunner, &mut out),
         Command::Pacnew(_) => unreachable!("handled above"),
+    }
+}
+
+/// Desktop notifier: notify-rust (feature `notify`), else `notify-send`.
+fn notifier() -> Box<dyn Notifier> {
+    #[cfg(feature = "notify")]
+    {
+        Box::new(archguard::notify_rust_impl::NotifyRust)
+    }
+    #[cfg(not(feature = "notify"))]
+    {
+        Box::new(archguard_core::notify::NotifySend)
     }
 }
 

@@ -12,9 +12,12 @@ makedepends=('git' 'cargo')
 provides=("$_pkgname")
 conflicts=("$_pkgname")
 optdepends=('meld: graphical 3-way .pacnew merge'
+            'libnotify: notify-send fallback for notifications'
+            'xdg-utils: open news links from the tray'
             'kdiff3: alternative graphical 3-way .pacnew merge'
             'sudo: elevation for upgrades and /etc writes')
 options=('!lto' '!debug')
+_features='archguard/alpm,archguard/notify,archguard-tray/alpm,archguard-tray/gui'
 source=("$_pkgname::git+$url.git")
 sha256sums=('SKIP')
 
@@ -37,17 +40,20 @@ build() {
   cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
-  cargo build --frozen --release --features alpm
+  cargo build --frozen --release --workspace --features "$_features"
 }
 
 check() {
   cd "$_pkgname"
   export RUSTUP_TOOLCHAIN=stable
-  cargo test --frozen --features alpm
+  cargo test --frozen --workspace --features "$_features"
 }
 
 package() {
   cd "$_pkgname"
-  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$_pkgname"
+  install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/$_pkgname" "target/release/$_pkgname-tray"
+  install -Dm0644 -t "$pkgdir/usr/lib/systemd/user/" \
+    packaging/systemd/archguard-check.service packaging/systemd/archguard-check.timer
+  install -Dm0644 packaging/archguard-tray.desktop "$pkgdir/usr/share/applications/archguard-tray.desktop"
   install -Dm0644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

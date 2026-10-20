@@ -33,7 +33,12 @@ pub struct NewsItem {
 impl NewsItem {
     /// Short human-friendly id: last path segment of the id/link (the slug).
     pub fn short_id(&self) -> &str {
-        let s = self.id.trim_end_matches('/');
+        let src = if self.id.starts_with("archguard:") {
+            self.link.as_deref().unwrap_or(&self.id)
+        } else {
+            &self.id
+        };
+        let s = src.trim_end_matches('/');
         s.rsplit('/').next().filter(|x| !x.is_empty()).unwrap_or(s)
     }
 }
@@ -77,38 +82,147 @@ pub fn strip_html(s: &str) -> String {
         .replace("&#39;", "'")
 }
 
-/// Parse an RSS/Atom document into news items.
+/// For each `<item>` / `<entry>` in document order, whether the *source*
+/// carries its own non-empty identifier (`<guid>`, `<id>` or `rdf:about`).
+/// feed-rs synthesises a random id when none exists, so we must look at the
+/// raw XML. Returns `None` if the document can't be scanned.
+pub fn raw_has_guid(bytes: &[u8]) -> Option<Vec<bool>> {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_reader(bytes);
+    let mut buf = Vec::new();
+    let mut out = Vec::new();
+    // depth relative to the current item (1 = direct child)
+    let mut item_depth: Option<usize> = None;
+    let mut in_id = false;
+    let mut has = false;
+    loop {
+        match reader.read_event_into(&mut buf).ok()? {
+            Event::Start(e) => {
+                let name = e.local_name();
+                let name = name.as_ref();
+                match item_depth {
+                    None if name == b"item" || name == b"entry" => {
+                        item_depth = Some(0);
+                        has = e.attributes().flatten().any(|a| {
+                            a.key.local_name().as_ref() == b"about"
+                                && a.value.iter().any(|c| !c.is_ascii_whitespace())
+                        });
+                    }
+                    Some(d) => {
+                        if d == 0 && (name == b"guid" || name == b"id") {
+                            in_id = true;
+                        }
+                        item_depth = Some(d + 1);
+                    }
+                    None => {}
+                }
+            }
+            Event::Empty(e) => {
+                let name = e.local_name();
+                if item_depth.is_none() && matches!(name.as_ref(), b"item" | b"entry") {
+                    out.push(false);
+                }
+            }
+            Event::Text(t) if in_id => {
+                if AsRef::<[u8]>::as_ref(&*t)
+                    .iter()
+                    .any(|c| !c.is_ascii_whitespace())
+                {
+                    has = true;
+                }
+            }
+            Event::CData(t) if in_id => {
+                if AsRef::<[u8]>::as_ref(&*t)
+                    .iter()
+                    .any(|c| !c.is_ascii_whitespace())
+                {
+                    has = true;
+                }
+            }
+            Event::End(_) => match item_depth {
+                Some(0) => {
+                    out.push(has);
+                    item_depth = None;
+                    has = false;
+                }
+                Some(d) => {
+                    if d == 1 {
+                        in_id = false;
+                    }
+                    item_depth = Some(d - 1);
+                }
+                None => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Some(out)
+}
+
+/// Deterministic id for items without a source GUID: SHA-256 of the link,
+/// or of title + published + summary when there is no link.
+pub fn stable_id(link: Option<&str>, title: &str, published: Option<i64>, summary: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    match link.map(str::trim).filter(|l| !l.is_empty()) {
+        Some(l) => {
+            h.update(b"link\0");
+            h.update(l.as_bytes());
+        }
+        None => {
+            h.update(b"content\0");
+            h.update(title.trim().as_bytes());
+            h.update(b"\0");
+            h.update(published.unwrap_or(0).to_string().as_bytes());
+            h.update(b"\0");
+            h.update(summary.trim().as_bytes());
+        }
+    }
+    let hex: String = h
+        .finalize()
+        .iter()
+        .take(12)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    format!("archguard:{hex}")
+}
+
+/// Parse an RSS/Atom document into news items. Items without a GUID in the
+/// source get a deterministic [`stable_id`] so acknowledgements persist.
+/// Fail-closed: items are never dropped.
 pub fn parse_feed(bytes: &[u8]) -> Result<Vec<NewsItem>> {
     let feed = feed_rs::parser::parse(bytes).context("failed to parse news feed")?;
+    // If the raw scan disagrees with feed-rs, trust nothing: derive all ids.
+    let guids = raw_has_guid(bytes).filter(|g| g.len() == feed.entries.len());
     Ok(feed
         .entries
         .into_iter()
-        .filter_map(|e| {
+        .enumerate()
+        .map(|(idx, e)| {
             let link = e.links.first().map(|l| l.href.clone());
-            let summary = e
-                .summary
-                .map(|t| t.content)
-                .or_else(|| e.content.and_then(|c| c.body))
-                .unwrap_or_default();
+            let summary = strip_html(
+                &e.summary
+                    .map(|t| t.content)
+                    .or_else(|| e.content.and_then(|c| c.body))
+                    .unwrap_or_default(),
+            );
             let title = e.title.map(|t| t.content).unwrap_or_default();
             let published = e.published.or(e.updated).map(|d| d.timestamp());
-            // Empty GUIDs: fall back to link, then title+date; skip if nothing usable.
-            let id = [Some(e.id), link.clone()]
-                .into_iter()
-                .flatten()
-                .map(|s| s.trim().to_string())
-                .find(|s| !s.is_empty())
-                .or_else(|| {
-                    (!title.trim().is_empty())
-                        .then(|| format!("title:{}:{}", published.unwrap_or(0), title.trim()))
-                })?;
-            Some(NewsItem {
+            let source_guid = guids.as_ref().is_some_and(|g| g[idx]) && !e.id.trim().is_empty();
+            let id = if source_guid {
+                e.id.trim().to_string()
+            } else {
+                stable_id(link.as_deref(), &title, published, &summary)
+            };
+            NewsItem {
                 id,
                 title,
-                summary: strip_html(&summary),
+                summary,
                 link,
                 published,
-            })
+            }
         })
         .collect())
 }
@@ -174,6 +288,46 @@ mod tests {
     #[test]
     fn strip_html_works() {
         assert_eq!(strip_html("<p>a &amp; b</p>").trim(), "a & b");
+    }
+
+    const NO_GUID: &[u8] = include_bytes!("../tests/fixtures/news_noguid.xml");
+
+    #[test]
+    fn missing_guid_ids_are_stable_across_parses() {
+        let a = parse_feed(NO_GUID).unwrap();
+        let b = parse_feed(NO_GUID).unwrap();
+        assert_eq!(a.len(), 4);
+        let ids: Vec<_> = a.iter().map(|i| i.id.clone()).collect();
+        assert_eq!(ids, b.iter().map(|i| i.id.clone()).collect::<Vec<_>>());
+        // Item with a real guid keeps it verbatim.
+        assert_eq!(a[0].id, "tag:archlinux.org,2026:/news/has-guid/");
+        // Others get deterministic, distinct ids.
+        assert!(a[1..].iter().all(|i| i.id.starts_with("archguard:")));
+        let uniq: std::collections::BTreeSet<_> = ids.iter().collect();
+        assert_eq!(uniq.len(), 4);
+        // Link-based id ignores title edits; slug still usable for `ack`.
+        assert_eq!(a[1].id, stable_id(a[1].link.as_deref(), "other", None, ""));
+        assert_eq!(a[1].short_id(), "no-guid-with-link");
+    }
+
+    #[test]
+    fn raw_guid_scan() {
+        assert_eq!(raw_has_guid(NO_GUID).unwrap(), [true, false, false, false]);
+        let atom = br#"<feed xmlns="http://www.w3.org/2005/Atom"><title>t</title>
+<entry><id>urn:x</id><title>a</title><source><id>urn:src</id></source></entry>
+<entry><title>b</title><source><id>urn:src</id></source></entry></feed>"#;
+        assert_eq!(raw_has_guid(atom).unwrap(), [true, false]);
+        let rdf = br#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><item rdf:about="http://x/1"><title>a</title></item></rdf:RDF>"#;
+        assert_eq!(raw_has_guid(rdf).unwrap(), [true]);
+    }
+
+    #[test]
+    fn stable_id_inputs() {
+        let a = stable_id(None, "t", Some(1), "s");
+        assert_eq!(a, stable_id(None, " t ", Some(1), "s"));
+        assert_ne!(a, stable_id(None, "t", Some(2), "s"));
+        assert_ne!(a, stable_id(None, "t", Some(1), "x"));
+        assert_ne!(stable_id(Some("l"), "", None, ""), a);
     }
 
     #[test]
