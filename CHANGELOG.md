@@ -6,7 +6,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased (tag pending)
+## [0.1.0] - 2026-10-20
 
 First public release.
 
@@ -26,6 +26,8 @@ First public release.
   with a per-hook timeout (`timeout_secs`, default 300) — failure or timeout
   blocks. Hooks run non-interactively (stdin closed) in their own process
   group; on timeout the whole group is killed (SIGTERM, then SIGKILL).
+  Known limitation: a hook that detaches with `setsid` / double fork leaves
+  the group and is not killed.
 - `archguard pacnew list|diff|merge`: 3-way merge of `.pacnew` files using the
   previous package version from the pacman cache as base (follows links inside
   the archive), meld/kdiff3 on conflict, writes through symlinks, keeps
