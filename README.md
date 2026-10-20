@@ -60,6 +60,16 @@ Run non-interactively (stdin closed, own process group), in order, as your user 
 
 `upgrade` refuses to run `-Syu` while `check` is blocking. Only `pacman` is elevated (sudo/run0); paru/yay are never run as root.
 
+**News matching.** Titles (and bodies with `match_summary = true`) are matched
+against installed package names. To avoid false positives, common English
+words that are also package names (`which`, `less`, `time`, `file`, `go`, ...)
+only match with a strong signal: `code` markup, package context ("the X
+package", "package X") or a version ("X-1.2", "X 1.2", "X >= 1.2"), and
+"Arch Linux" never matches `linux`. This means a news item that mentions such a
+package only as a bare word no longer blocks. To be stricter, set
+`always_block = true` (every unacknowledged item blocks); to be looser, put a
+name in `ignore`; add your own ambiguous words to `weak_words`.
+
 Config `~/.config/archguard.toml` (all optional):
 
 ```toml
@@ -72,6 +82,8 @@ min_name_len = 2
 ignore = []
 always_block = false
 max_age_days = 0
+weak_words = []        # extra words that need `code`, "the X package" or a version to match
+phrases = []           # extra phrases that never name a package ("Arch Linux" is built in)
 [pacnew]
 merge_tool = "auto"    # auto | meld | kdiff3 | none
 scan_dirs = ["/etc"]

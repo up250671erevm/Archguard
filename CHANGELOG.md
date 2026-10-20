@@ -17,6 +17,16 @@ and the project uses [Semantic Versioning](https://semver.org/).
 - "Arch Linux" (and "Arch Wiki", "archlinux.org", "Linux Foundation") is
   treated as a phrase and no longer matches `linux`. Reported: "Arch Linux 2026
   Leader Election Results" matched `linux`.
+- Word + version is a strong signal ("screen-4.2.0", "Go 1.24", "less >= 680"),
+  so real news such as "screen-4.2.0 cannot reattach older instances" keep
+  blocking.
+- Names are extracted without the full `-<version>-<pkgrel>` suffix
+  ("screen-4.4.0-1" -> `screen`; previously only `-1` was removed).
+
+### Changed
+- Behaviour change: a news item that mentions a common-word package only as a
+  bare word (e.g. "which") no longer blocks. Use `always_block = true` to block
+  on every unacknowledged item, or `weak_words`/`ignore` to tune.
 
 ### Added
 - `[matching] weak_words` and `[matching] phrases` extend the built-in lists;
@@ -63,4 +73,5 @@ First public release.
   `systemd-analyze --user verify`, and builds the release package in a clean chroot.
 
 [Unreleased]: https://github.com/up250671erevm/Archguard/compare/v0.1.0...HEAD
+[0.1.1]: https://github.com/up250671erevm/Archguard/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/up250671erevm/Archguard/releases/tag/v0.1.0

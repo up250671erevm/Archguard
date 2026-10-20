@@ -24,9 +24,12 @@ pub const BUILTIN_PHRASES: &[&str] = &[
 
 /// Common English words that are also Arch package names (lowercase).
 pub const BUILTIN_WEAK_WORDS: &[&str] = &[
-    "which", "less", "time", "file", "make", "patch", "words", "screen", "watch", "tree", "units",
-    "most", "dialog", "expect", "at", "man", "info", "help", "core", "extra", "base", "check",
-    "pass", "links", "parallel", "dash", "fish", "zip", "go", "bc", "ed", "arch",
+    "which", "less", "time", "file", "make", "patch", "words", "watch", "tree", "units", "most",
+    "dialog", "expect", "at", "man", "info", "check", "pass", "links", "parallel", "dash", "go",
+    "bc", "ed", "base",
+    // Not official package names, but common in titles ("[core]", "Arch …",
+    // "help wanted") and possibly installed from the AUR / local repos.
+    "arch", "core", "extra", "help",
 ];
 
 /// Characters allowed in Arch package names.
@@ -44,16 +47,20 @@ pub fn tokens(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for raw in text.split(|c: char| !is_pkg_char(c)) {
         let Some(lower) = clean(raw) else { continue };
-        // "foo>=2.0" / "foo-2.0" style: also try without a trailing version.
-        if let Some(idx) = lower.rfind('-') {
-            let (head, tail) = lower.split_at(idx);
-            if tail[1..].starts_with(|c: char| c.is_ascii_digit()) && !head.is_empty() {
-                out.insert(head.to_string());
-            }
-        }
+        // "foo-2.0" / "foo-4.4.0-1" style: also try every prefix before a
+        // "-<digit>", so the whole -<version>-<pkgrel> suffix is stripped.
+        out.extend(versioned_heads(&lower));
         out.insert(lower);
     }
     out
+}
+
+/// Prefixes of `tok` that precede a `-<digit>` ("screen-4.4.0-1" -> "screen", "screen-4.4.0").
+fn versioned_heads(tok: &str) -> Vec<String> {
+    tok.match_indices('-')
+        .filter(|(i, _)| *i > 0 && tok[i + 1..].starts_with(|c: char| c.is_ascii_digit()))
+        .map(|(i, _)| tok[..i].to_string())
+        .collect()
 }
 
 /// Remove phrases (case-insensitive, word-bounded) by replacing them with spaces.
@@ -82,8 +89,9 @@ fn strip_phrases(text: &str, phrases: &[String]) -> String {
     lower
 }
 
-/// Tokens with a strong package signal: `code`, or "the X package",
-/// "package X", "X package(s)" / "X pkg".
+/// Tokens with a strong package signal: `code`, "the X package",
+/// "package X", "X package(s)" / "X pkg", or word + version
+/// ("X-1.2", "X 1.2", "X >= 1.2", "X=1.2").
 pub fn strong_tokens(text: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     // Backtick spans (HTML <code> is converted to backticks by the feed parser).
@@ -96,6 +104,36 @@ pub fn strong_tokens(text: &str) -> BTreeSet<String> {
         .split(|c: char| !is_pkg_char(c))
         .filter_map(clean)
         .collect();
+    // Word + version.
+    let raw: Vec<&str> = text.split_whitespace().collect();
+    for (i, r) in raw.iter().enumerate() {
+        let r = r.trim_matches(|c: char| !is_pkg_char(c) && !matches!(c, '<' | '>' | '='));
+        let (name, op) = match r.find(['<', '>', '=']) {
+            Some(j) => (&r[..j], Some(&r[j..])),
+            None => (r, None),
+        };
+        let Some(name) = clean(name) else { continue };
+        out.extend(versioned_heads(&name));
+        let digit = |s: &str| {
+            s.trim_start_matches(['<', '>', '='])
+                .starts_with(|c: char| c.is_ascii_digit())
+        };
+        let versioned = match op {
+            Some(op) if op.trim_start_matches(['<', '>', '=']).is_empty() => {
+                raw.get(i + 1).is_some_and(|n| digit(n))
+            }
+            Some(op) => digit(op),
+            None => raw.get(i + 1).is_some_and(|n| {
+                let n = n.trim_start_matches(['(', '[']);
+                n.starts_with(|c: char| c.is_ascii_digit())
+                    || (n.starts_with(['<', '>', '='])
+                        && (digit(n) || raw.get(i + 2).is_some_and(|m| digit(m))))
+            }),
+        };
+        if versioned {
+            out.insert(name);
+        }
+    }
     let is_pkg_word = |w: &str| matches!(w, "package" | "packages" | "pkg");
     for (i, w) in words.iter().enumerate() {
         if is_pkg_word(w) {
@@ -121,13 +159,15 @@ pub fn matched_packages(
         text.push(' ');
         text.push_str(&item.summary);
     }
-    let strong = strong_tokens(&text);
     let phrases: Vec<String> = BUILTIN_PHRASES
         .iter()
         .map(|s| s.to_string())
         .chain(opts.phrases.iter().cloned())
         .collect();
-    let plain = tokens(&strip_phrases(&text, &phrases));
+    // Phrases are removed first so "Arch Linux 2026" is not "linux + version".
+    let text = strip_phrases(&text, &phrases);
+    let strong = strong_tokens(&text);
+    let plain = tokens(&text);
     let weak = |t: &str| {
         BUILTIN_WEAK_WORDS.contains(&t) || opts.weak_words.iter().any(|w| w.eq_ignore_ascii_case(t))
     };
@@ -312,5 +352,47 @@ mod tests {
             ..Default::default()
         };
         assert!(matched_packages(&item("the `which` package", ""), &inst, &opts).is_empty());
+    }
+
+    #[test]
+    fn word_plus_version_is_strong() {
+        let inst = set(&["screen", "ncurses", "go", "less", "which"]);
+        let t = |title: &str| matched_packages(&item(title, ""), &inst, &Matching::default());
+        // Real Arch news titles.
+        assert_eq!(
+            t("screen-4.2.0 cannot reattach older instances"),
+            set(&["screen"])
+        );
+        assert_eq!(
+            t("screen-4.2.1 cannot reattach older instances either"),
+            set(&["screen"])
+        );
+        assert_eq!(t("screen and ncurses"), set(&["screen", "ncurses"]));
+        let opts = Matching {
+            match_summary: true,
+            ..Default::default()
+        };
+        let i = item(
+            "Session news",
+            "screen-4.4.0-1 unable to attach old sessions",
+        );
+        assert_eq!(matched_packages(&i, &inst, &opts), set(&["screen"]));
+        // go stays weak, but go + version is strong.
+        assert!(t("Go faster with the new mirrors").is_empty());
+        assert_eq!(t("Go 1.24 requires rebuilding Go packages"), set(&["go"]));
+        assert_eq!(t("go-1.23.4-1 breaks cgo"), set(&["go"]));
+        assert_eq!(t("less >= 680 changes defaults"), set(&["less"]));
+        assert_eq!(t("less>=680 changes defaults"), set(&["less"]));
+        assert_eq!(t("which=2.21 removed"), set(&["which"]));
+        assert!(t("Less is more").is_empty());
+        assert!(t("which 's' is it").is_empty());
+    }
+
+    #[test]
+    fn strips_full_version_and_pkgrel() {
+        let t = tokens("screen-4.4.0-1 and lib32-mesa-24.1.0-2");
+        assert!(t.contains("screen"));
+        assert!(t.contains("lib32-mesa"));
+        assert!(!t.contains("lib32"));
     }
 }
