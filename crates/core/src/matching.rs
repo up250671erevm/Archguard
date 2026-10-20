@@ -55,7 +55,10 @@ pub fn tokens(text: &str) -> BTreeSet<String> {
     out
 }
 
-/// Prefixes of `tok` that precede a `-<digit>` ("screen-4.4.0-1" -> "screen", "screen-4.4.0").
+/// All prefixes of `tok` that precede a `-<digit>`, not only the first:
+/// "screen-4.4.0-1" -> ["screen", "screen-4.4.0"]. Returning every one strips a
+/// full `-<version>-<pkgrel>` suffix while keeping names that themselves
+/// contain `-<digit>` reachable.
 fn versioned_heads(tok: &str) -> Vec<String> {
     tok.match_indices('-')
         .filter(|(i, _)| *i > 0 && tok[i + 1..].starts_with(|c: char| c.is_ascii_digit()))
@@ -394,5 +397,12 @@ mod tests {
         assert!(t.contains("screen"));
         assert!(t.contains("lib32-mesa"));
         assert!(!t.contains("lib32"));
+    }
+
+    #[test]
+    fn arch_version_title_matches_no_real_package() {
+        // Old "Arch 0.7.2 released"-style titles: `arch` is weak and not an official package.
+        assert!(m("Arch 0.7.2 released").is_empty());
+        assert!(m("Arch Linux 0.7.2 (Gimmick) released").is_empty());
     }
 }

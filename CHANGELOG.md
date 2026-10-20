@@ -6,7 +6,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.1.1] - unreleased
+## [0.1.1] - 2026-10-20
 
 ### Fixed
 - News matching false positives: common English words that are also package
@@ -72,6 +72,6 @@ First public release.
   CI builds both, runs namcap, verifies the user units with
   `systemd-analyze --user verify`, and builds the release package in a clean chroot.
 
-[Unreleased]: https://github.com/up250671erevm/Archguard/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/up250671erevm/Archguard/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/up250671erevm/Archguard/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/up250671erevm/Archguard/releases/tag/v0.1.0
