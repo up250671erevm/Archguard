@@ -67,7 +67,7 @@ PKGBUILD/.SRCINFO/Cargo.toml/CHANGELOG mismatch, and a sha256 that doesn't
 match the real GitHub tarball:
 
 ```sh
-packaging/check-release-ready.sh 0.1.0 || exit 1
+packaging/check-release-ready.sh 0.1.0 && echo OK   # stop here if this fails
 ```
 
 CI also runs this guard on `main` as soon as the checksum is no longer the
@@ -79,9 +79,9 @@ One-time: add your SSH key to your AUR account. Then for each package:
 git clone ssh://aur@aur.archlinux.org/archguard.git aur-archguard
 packaging/check-release-ready.sh 0.1.0 && cp packaging/archguard/{PKGBUILD,.SRCINFO} aur-archguard/
 cd aur-archguard
-git add PKGBUILD .SRCINFO
-git commit -m "Update to 0.1.0"
-git push
+git add PKGBUILD .SRCINFO &&
+  git commit -m "Update to 0.1.0" &&
+  git push
 ```
 
 `archguard-git` the same way (`ssh://aur@aur.archlinux.org/archguard-git.git`,
