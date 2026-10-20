@@ -18,6 +18,6 @@ pkgbase = archguard
 	options = !lto
 	options = !debug
 	source = archguard-0.1.1.tar.gz::https://github.com/up250671erevm/Archguard/archive/refs/tags/v0.1.1.tar.gz
-	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+	sha256sums = 8be3d1484c6d826040f128977ba18072f45c3eb4e279b6b94d51ffd4a92996bb
 
 pkgname = archguard
