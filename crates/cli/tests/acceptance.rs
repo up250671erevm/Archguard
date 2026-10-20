@@ -116,3 +116,33 @@ fn ack_rejects_empty_id() {
     assert!(cmd_ack(&mut c, &["  ".into()], false, &mut Vec::new()).is_err());
     assert!(c.state.acked.is_empty());
 }
+
+/// Regression (testerdin, PR #7): items without GUID must keep a stable id so
+/// an ack survives re-fetching; untitled ones must not block forever.
+#[test]
+fn ack_of_guidless_items_persists_across_refetch() {
+    const NO_GUID: &[u8] = include_bytes!("../../core/tests/fixtures/news_noguid.xml");
+    let dir = std::env::temp_dir().join(format!("ag-noguid-{}", std::process::id()));
+    let state_path = dir.join("state");
+    let pkgs = FakePackages::new(["foolib"]);
+
+    // First run: blocked by the untitled item and the foolib item.
+    let n1 = StaticNews(parse_feed(NO_GUID).unwrap());
+    let mut c = ctx(&n1, &pkgs, Helper::Pacman);
+    assert_eq!(cmd_check(&c, &mut Vec::new()).unwrap(), EXIT_BLOCKED);
+    cmd_ack(&mut c, &[], true, &mut Vec::new()).unwrap();
+    c.state.save(&state_path).unwrap();
+
+    // Second run: fresh parse + state reload -> nothing blocks.
+    let n2 = StaticNews(parse_feed(NO_GUID).unwrap());
+    let mut c2 = ctx(&n2, &pkgs, Helper::Pacman);
+    c2.state = State::load(&state_path).unwrap();
+    assert_eq!(cmd_check(&c2, &mut Vec::new()).unwrap(), EXIT_OK);
+    let mut runner = MockRunner::default();
+    assert_eq!(
+        cmd_upgrade(&c2, &[], &mut runner, &mut Vec::new()).unwrap(),
+        0
+    );
+    assert_eq!(runner.calls.len(), 1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
